@@ -53,6 +53,47 @@ not authorize Needle to launch or orchestrate those hosts. Non-Codex execution
 is a later milestone with separate compatibility, isolation, and validation
 requirements. See the [product roadmap](ROADMAP.md).
 
+## Canonical Codex role profiles
+
+Named Codex role profiles are persisted in the local SQLite database as
+canonical, immutable definition revisions. The supported roles are
+`explorer`, `implementer`, `test_runner`, `reviewer`, `verifier`, and `auditor`;
+the host is always `codex`. Definitions are stored separately from runtime
+settings and `ModelPolicy`, and are not automatically selected or activated.
+
+The safe policy vocabulary is deliberately closed:
+
+- tools: `read_only` or `isolated_write`;
+- commands: `denied`, `read_only`, or `certified_tests`;
+- filesystem: `read_only_checkout` or `disposable_checkout`;
+- network: `denied` only;
+- tests: `disabled` or `certified`;
+- repair: `none` or `once`;
+- fallback: `disabled` or `native`.
+
+`isolated_write` is limited to `implementer` in a `disposable_checkout`.
+Every other role is read-only. `certified_tests` is paired with `certified`
+tests and is limited to `test_runner` or `verifier`. Concurrency is exactly
+one. Timeout is 1--3600 seconds; budgets are 1--8 turns, 1--2000 output
+tokens, and 1--1,000,000,000 micro-USD. Route assignments are canonicalized
+by sort-and-deduplicate and are bounded by the hard per-task limit of eight.
+Models are 1--128 ASCII `[A-Za-z0-9._-]` tokens; credential-like prefixes,
+paths, credentials, and network settings are rejected.
+
+Each revision stores its complete canonical JSON and definition digest. State
+changes use a generation-bound state digest (draft, active, or inactive) and
+are applied transactionally. Historical revisions remain readable; activating
+an exact historical revision does not rewrite its definition. `Default` tier
+projects to the existing `WorkerProfile` representation with `None`, while
+`Priority` projects to `Some("priority")`; that compatibility digest is
+distinct from the role-profile definition/revision digest. Projection is
+explicit and does not read or modify `ModelPolicy`.
+
+The domain and SQLite migration are currently an offline persistence boundary:
+there is no HTTP/editor UI, session or worker binding, lifecycle executor, or
+automatic activation yet. Role profiles never carry credentials, host paths,
+or network access.
+
 ## Export and import
 
 ```text

@@ -1,0 +1,393 @@
+use super::*;
+use needle_core::{
+    CodexHost, CodexRole, CommandPolicy, FallbackPolicy, FilesystemPolicy, NetworkPolicy,
+    RepairPolicy, RoleProfileBudget, RoleProfileDefinitionInput, RoleProfileId, ServiceTier,
+    TestPolicy, ToolPolicy,
+};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn temporary_store() -> (PathBuf, RuntimeStore) {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let path = std::env::temp_dir().join(format!("needle-role-profile-{nanos}.sqlite3"));
+    (path.clone(), RuntimeStore::new(path))
+}
+
+fn definition(id: &str) -> RoleProfileDefinition {
+    RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: RoleProfileId::new(id).unwrap(),
+        role: CodexRole::Explorer,
+        host: CodexHost::Codex,
+        model: "gpt-5".to_owned(),
+        reasoning: needle_core::ReasoningLevel::Medium,
+        service_tier: ServiceTier::Default,
+        timeout_seconds: 120,
+        budget: RoleProfileBudget {
+            max_turns: 2,
+            max_output_tokens: 1200,
+            max_cost_microusd: 1000,
+        },
+        prompt_profile_digest: Digest::blake3(b"prompt"),
+        output_contract_digest: Digest::blake3(b"output"),
+        tool_policy: ToolPolicy::ReadOnly,
+        command_policy: CommandPolicy::ReadOnly,
+        filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+        network_policy: NetworkPolicy::Denied,
+        test_policy: TestPolicy::Disabled,
+        repair_policy: RepairPolicy::None,
+        fallback_policy: FallbackPolicy::Native,
+        concurrency: 1,
+        route_assignments: vec![],
+    })
+    .unwrap()
+}
+
+#[test]
+fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
+    let (path, store) = temporary_store();
+    store.initialize().unwrap();
+    let connection = Connection::open(&path).unwrap();
+    let versions: Vec<u32> = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(versions, (1..=14).collect::<Vec<_>>());
+    for name in
+        ["role_profiles", "role_profile_revisions", "role_profile_state", "role_profile_audit"]
+    {
+        let count: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing table {name}");
+    }
+    drop(connection);
+    let first = store.create_role_profile(definition("explorer.default")).unwrap();
+    let id = first.profile_id.clone();
+    assert_eq!(
+        store
+            .read_role_profile_revision_by_digest(&id, first.definition.definition_digest)
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        store
+            .read_role_profile_revision_by_digest_global(first.definition.definition_digest)
+            .unwrap()
+            .revision,
+        1
+    );
+    let state = store.role_profile_state(&id).unwrap();
+    let mut second_definition = definition("explorer.default");
+    second_definition.model = "gpt-5-mini".to_owned();
+    second_definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        model: second_definition.model,
+        profile_id: second_definition.profile_id,
+        role: second_definition.role,
+        host: second_definition.host,
+        reasoning: second_definition.reasoning,
+        service_tier: second_definition.service_tier,
+        timeout_seconds: second_definition.timeout_seconds,
+        budget: second_definition.budget,
+        prompt_profile_digest: second_definition.prompt_profile_digest,
+        output_contract_digest: second_definition.output_contract_digest,
+        tool_policy: second_definition.tool_policy,
+        command_policy: second_definition.command_policy,
+        filesystem_policy: second_definition.filesystem_policy,
+        network_policy: second_definition.network_policy,
+        test_policy: second_definition.test_policy,
+        repair_policy: second_definition.repair_policy,
+        fallback_policy: second_definition.fallback_policy,
+        concurrency: second_definition.concurrency,
+        route_assignments: second_definition.route_assignments,
+    })
+    .unwrap();
+    let revised = store.revise_role_profile(&id, state.state_digest, second_definition).unwrap();
+    assert_eq!(revised.revision, 2);
+    assert_eq!(store.list_role_profile_revisions(&id).unwrap().len(), 2);
+    let connection = Connection::open(&path).unwrap();
+    assert!(connection
+        .execute(
+            "DELETE FROM role_profile_revisions WHERE profile_id='explorer.default' AND revision=1",
+            [],
+        )
+        .is_err());
+    assert!(
+        connection
+            .execute("UPDATE role_profile_audit SET created_unix_ms=0 WHERE audit_id=1", [])
+            .is_err()
+    );
+    drop(connection);
+    let stale = store.revise_role_profile(&id, state.state_digest, definition("explorer.default"));
+    assert!(matches!(stale, Err(StoreError::RoleProfileConflict(_))));
+    let state = store.role_profile_state(&id).unwrap();
+    let active = store.activate_role_profile(&id, 1, state.state_digest).unwrap();
+    assert_eq!(active.state, RoleProfileState::Active);
+    let state = store.role_profile_state(&id).unwrap();
+    let switched = store.activate_role_profile(&id, 2, state.state_digest).unwrap();
+    assert_eq!(switched.state, RoleProfileState::Active);
+    assert_eq!(store.read_role_profile_revision(&id, 1).unwrap().state, RoleProfileState::Inactive);
+    let active_state = store.role_profile_state(&id).unwrap();
+    assert_eq!(
+        store.activate_role_profile(&id, 1, active_state.state_digest).unwrap().state,
+        RoleProfileState::Active
+    );
+    let deactivated = store
+        .deactivate_role_profile(&id, store.role_profile_state(&id).unwrap().state_digest)
+        .unwrap();
+    assert_eq!(deactivated.state, RoleProfileState::Inactive);
+    assert_eq!(store.read_role_profile_revision(&id, 2).unwrap().state, RoleProfileState::Draft);
+    assert!(store.read_active_role_profile(&id).unwrap().is_none());
+    let audit = store.read_role_profile_audit(&id, 100).unwrap();
+    assert_eq!(audit.len(), 6);
+    assert_eq!(audit[0].operation, RoleProfileAuditOperation::Deactivate);
+    assert_eq!(audit[1].operation, RoleProfileAuditOperation::Activate);
+    assert_eq!(audit[2].operation, RoleProfileAuditOperation::Activate);
+    assert_eq!(audit[3].operation, RoleProfileAuditOperation::Activate);
+    assert_eq!(audit[4].operation, RoleProfileAuditOperation::Revise);
+    assert_eq!(audit[5].operation, RoleProfileAuditOperation::Create);
+    let create_audit = &audit[5];
+    assert_eq!(create_audit.definition_digest, first.definition.definition_digest);
+    assert_eq!(create_audit.prior_state, None);
+    assert_eq!(create_audit.resulting_state, RoleProfileState::Draft);
+    assert_eq!(create_audit.prior_active_revision, None);
+    assert_eq!(create_audit.prior_active_digest, None);
+    assert_eq!(create_audit.resulting_active_revision, None);
+    assert_eq!(create_audit.resulting_active_digest, None);
+    assert!(create_audit.created_unix_ms > 0);
+    let activate_audit = &audit[3];
+    assert_eq!(activate_audit.definition_digest, first.definition.definition_digest);
+    assert_eq!(activate_audit.prior_state, Some(RoleProfileState::Inactive));
+    assert_eq!(activate_audit.resulting_state, RoleProfileState::Active);
+    assert!(activate_audit.prior_state_digest.is_some());
+    assert_eq!(activate_audit.prior_active_revision, None);
+    assert_eq!(activate_audit.prior_active_digest, None);
+    assert_eq!(activate_audit.resulting_active_revision, Some(1));
+    assert_eq!(activate_audit.resulting_active_digest, Some(first.definition.definition_digest));
+    assert!(activate_audit.created_unix_ms > 0);
+    let deactivate_audit = &audit[0];
+    assert_eq!(deactivate_audit.definition_digest, first.definition.definition_digest);
+    assert_eq!(deactivate_audit.prior_state, Some(RoleProfileState::Active));
+    assert_eq!(deactivate_audit.resulting_state, RoleProfileState::Inactive);
+    assert!(deactivate_audit.prior_state_digest.is_some());
+    assert_eq!(deactivate_audit.prior_active_revision, Some(1));
+    assert_eq!(deactivate_audit.prior_active_digest, Some(first.definition.definition_digest));
+    assert_eq!(deactivate_audit.resulting_active_revision, None);
+    assert_eq!(deactivate_audit.resulting_active_digest, None);
+    assert!(deactivate_audit.created_unix_ms > 0);
+    assert!(matches!(
+        store.read_role_profile_audit(&id, 101),
+        Err(StoreError::RoleProfileValidation(_))
+    ));
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn stale_state_does_not_mutate_and_trigger_blocks_definition_mutation() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("auditor")).unwrap();
+    let id = first.profile_id.clone();
+    let before_state = store.role_profile_state(&id).unwrap();
+    let before_audit_count = store.read_role_profile_audit(&id, 100).unwrap().len();
+    let stale = store.activate_role_profile(&id, 1, Digest::blake3(b"stale"));
+    assert!(matches!(stale, Err(StoreError::RoleProfileConflict(_))));
+    let after_state = store.role_profile_state(&id).unwrap();
+    assert_eq!(before_state.state_generation, after_state.state_generation);
+    assert_eq!(before_state.state_digest, after_state.state_digest);
+    assert_eq!(before_audit_count, store.read_role_profile_audit(&id, 100).unwrap().len());
+    let connection = Connection::open(&path).unwrap();
+    assert!(connection
+        .execute("UPDATE role_profile_revisions SET definition_json='{}' WHERE profile_id='auditor' AND revision=1", [])
+        .is_err());
+    drop(connection);
+    assert_eq!(store.list_role_profile_revisions(&id).unwrap().len(), 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn inconsistent_state_pointers_fail_closed_without_historical_fallback() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("auditor")).unwrap();
+    let id = first.profile_id.clone();
+    let state = store.role_profile_state(&id).unwrap();
+    let mut revised = definition("auditor");
+    revised.model = "gpt-5-mini".to_owned();
+    revised = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        model: revised.model,
+        profile_id: revised.profile_id,
+        role: revised.role,
+        host: revised.host,
+        reasoning: revised.reasoning,
+        service_tier: revised.service_tier,
+        timeout_seconds: revised.timeout_seconds,
+        budget: revised.budget,
+        prompt_profile_digest: revised.prompt_profile_digest,
+        output_contract_digest: revised.output_contract_digest,
+        tool_policy: revised.tool_policy,
+        command_policy: revised.command_policy,
+        filesystem_policy: revised.filesystem_policy,
+        network_policy: revised.network_policy,
+        test_policy: revised.test_policy,
+        repair_policy: revised.repair_policy,
+        fallback_policy: revised.fallback_policy,
+        concurrency: revised.concurrency,
+        route_assignments: revised.route_assignments,
+    })
+    .unwrap();
+    store.revise_role_profile(&id, state.state_digest, revised).unwrap();
+    let valid_state = store.role_profile_state(&id).unwrap();
+
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    connection
+        .execute(
+            "UPDATE role_profile_state SET latest_revision=1, active_revision=2 WHERE profile_id='auditor'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(store.role_profile_state(&id), Err(StoreError::RoleProfileCorruption(_))));
+    assert!(matches!(
+        store.read_active_role_profile(&id),
+        Err(StoreError::RoleProfileCorruption(_))
+    ));
+    assert!(matches!(
+        store.activate_role_profile(&id, 2, valid_state.state_digest),
+        Err(StoreError::RoleProfileCorruption(_))
+    ));
+
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    connection
+        .execute(
+            "UPDATE role_profile_state SET latest_revision=2, active_revision=NULL, state_generation=0 WHERE profile_id='auditor'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(store.role_profile_state(&id), Err(StoreError::RoleProfileCorruption(_))));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn v14_upgrades_a_valid_v13_database_and_rejects_checksum_drift() {
+    let (path, store) = temporary_store();
+    let connection = Connection::open(&path).unwrap();
+    let migrations = [
+        (1, super::super::MIGRATION_V1),
+        (2, super::super::MIGRATION_V2),
+        (3, super::super::MIGRATION_V3),
+        (4, super::super::MIGRATION_V4),
+        (5, super::super::MIGRATION_V5),
+        (6, super::super::MIGRATION_V6),
+        (7, super::super::MIGRATION_V7),
+        (8, super::super::MIGRATION_V8),
+        (9, super::super::MIGRATION_V9),
+        (10, super::super::MIGRATION_V10),
+        (11, super::super::MIGRATION_V11),
+        (12, super::super::MIGRATION_V12),
+        (13, super::super::MIGRATION_V13),
+    ];
+    for (version, migration) in migrations {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_unix_ms) VALUES(?1, ?2, 0)",
+                rusqlite::params![version, Digest::blake3(migration).to_string()],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    store.initialize().unwrap();
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 14);
+    connection
+        .execute("UPDATE schema_migrations SET checksum='b3:invalid' WHERE version=14", [])
+        .unwrap();
+    drop(connection);
+    let drifted = RuntimeStore::new(&path);
+    assert!(matches!(drifted.initialize(), Err(StoreError::MigrationChecksum)));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn corrupt_role_digest_or_active_pointer_fails_closed_without_fallback() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("auditor")).unwrap();
+    let id = first.profile_id.clone();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute("UPDATE role_profiles SET role='reviewer' WHERE profile_id='auditor'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(store.role_profile_state(&id), Err(StoreError::RoleProfileCorruption(_))));
+    drop(store);
+    let _ = std::fs::remove_file(path);
+
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("auditor")).unwrap();
+    let id = first.profile_id.clone();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute("DROP TRIGGER role_profile_revisions_immutable", []).unwrap();
+    connection
+        .execute(
+            "UPDATE role_profile_revisions SET definition_digest=?1 WHERE profile_id='auditor' AND revision=1",
+            [Digest::blake3(b"corrupt").to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.read_role_profile_revision(&id, 1),
+        Err(StoreError::RoleProfileCorruption(_))
+    ));
+    drop(store);
+    let _ = std::fs::remove_file(path);
+
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("auditor")).unwrap();
+    let id = first.profile_id.clone();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    connection
+        .execute("UPDATE role_profile_state SET active_revision=99 WHERE profile_id='auditor'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.read_active_role_profile(&id),
+        Err(StoreError::RoleProfileCorruption(_))
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn role_profile_persistence_does_not_mutate_settings_or_model_policy() {
+    let (path, store) = temporary_store();
+    store
+        .initialize_defaults(&crate::RuntimeSettings {
+            codex_executable: "codex".to_owned(),
+            worker_model: "worker".to_owned(),
+            worker_reasoning: "medium".to_owned(),
+            worker_timeout_seconds: 30,
+            evidence_failure_policy: needle_core::EvidenceFailurePolicy::DiscardInvalidFact,
+            trusted_test_execution: false,
+            multi_need_policy: needle_core::MultiNeedPolicy::default(),
+        })
+        .unwrap();
+    let before_settings = store.settings().unwrap();
+    let before_policy = store.model_policy().unwrap();
+    store.create_role_profile(definition("explorer.default")).unwrap();
+    assert_eq!(store.settings().unwrap(), before_settings);
+    assert_eq!(store.model_policy().unwrap(), before_policy);
+    let _ = std::fs::remove_file(path);
+}

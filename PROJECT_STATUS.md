@@ -29,7 +29,7 @@ one.
 | Multi-need and structured MCP | Sequential and steer delivery, bounded ledger, structured JSON tools, cancellation, shared resolver | App Server simulator and one structured MCP cache-hit observation | **Implemented; offline validated; live calibration** |
 | Claim-level reuse | Validator-extracted claims, claim proofs, mixed planning, and bounded authoritative location, runtime-flow, and focused-test claims | Deterministic freshness, mutation, negative, projection, economics, and performance cases | **Implemented; offline validated** |
 | Verified changes | Isolated patch preparation, independent verifier, one repair, explicit journaled apply | Simulator and focused persistence, isolation, drift, and recovery tests | **Implemented; offline validated** |
-| Codex role-profile control plane | Codex model ladder, worker settings, concurrency bounds, and audited updates exist; named role profiles and complete policy editing do not | Current settings/model-policy API and frontend tests | **Pending** |
+| Codex role-profile control plane | Canonical Codex role definitions, bounded policies, immutable revisions, state-digest CAS, SQLite V14 persistence, audit records, and explicit WorkerProfile projection | Focused deterministic needle-core and needle-runtime offline tests; editor, session binding, and lifecycle integration remain pending | **Implemented; offline validated** |
 | Codex development lifecycle orchestration | Evidence, patch, test, verification, approval, and apply primitives exist; the configurable parent-owned role lifecycle is not integrated | Component-level offline evidence only | **Pending** |
 | Other-host subagent configuration | Configuration-only interoperability is planned for Claude Code and Cursor, followed by OpenCode and Antigravity | Not available | **Pending** |
 | Multi-host orchestration | Execution remains Codex-only; non-Codex execution follows configuration interoperability, a host contract, and conformance evidence | Not available | **Pending** |
@@ -60,7 +60,8 @@ provider-backed claim-authority observation exists.
 | Structured stdio MCP | **Implemented; offline validated; bounded live calibration** |
 | Embedded React control plane | **Implemented; frontend and local end-to-end validation** |
 | Needs, proofs, claims, changes, runs, models, cache, settings, approvals | **Implemented; development interface** |
-| Named subagent role profiles and lifecycle editor | **Pending; Codex-first** |
+| Canonical named Codex role-profile domain and revision store | **Implemented; offline validated** |
+| Named role-profile HTTP/editor, session binding, and lifecycle integration | **Pending; Codex-first** |
 | Non-Codex subagent configuration | **Pending; configuration only before execution** |
 | Non-Codex execution and orchestration | **Pending; later milestone** |
 | Stable public API or configuration compatibility | **Pending** |
@@ -122,6 +123,9 @@ validation.
 - Claim authority is deliberately narrow, defaults to `Shadow`, and has no
   provider-backed evidence.
 - Verified changes have no provider-backed patcher or verifier observation.
+- Canonical role-profile definitions and revision persistence are implemented
+  and offline validated, but there is no HTTP/editor UI, session or worker
+  binding, lifecycle executor, or automatic profile activation yet.
 - The verifier handles at most one distinct associated certified test plan;
   multiple plans produce an inconclusive verdict.
 - Binary, symlink, submodule, rename, three-way merge, patch reuse, automatic

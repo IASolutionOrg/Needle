@@ -28,7 +28,8 @@ pub use store::{
     CacheRecord, ChangeAttemptRecord, ConfigExport, MainTurnObservationRecord, NeedShadowRecord,
     NeedShadowWrite, NeedStepEventRecord, NeedStepRequestRecord, NegativeAttemptRecord,
     OperatorCostKey, OperatorCostObservation, PatchFileBlob, PreparedChangeRecord,
-    ProofAccountingRecord, RouteCostObservation, RoutePromotionRecord, RuntimeSettings,
+    ProofAccountingRecord, RoleProfileAuditOperation, RoleProfileAuditRecord,
+    RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord, RuntimeSettings,
     RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
 };
 
