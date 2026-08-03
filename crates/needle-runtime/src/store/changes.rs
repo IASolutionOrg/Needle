@@ -19,6 +19,9 @@ type PreparedChangeRow = (
     Option<String>,
 );
 
+type ExistingChangeRequestRow =
+    (String, String, String, String, Option<String>, Option<u64>, Option<String>);
+
 fn with_role_profile_provenance(
     value: &serde_json::Value,
     provenance: Option<&RoleProfileProvenance>,
@@ -144,15 +147,7 @@ impl RuntimeStore {
         let mut connection = self.connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<u64>,
-            Option<String>,
-        )> = transaction
+        let existing: Option<ExistingChangeRequestRow> = transaction
             .query_row(
                 "SELECT request_digest, repository_id, source_snapshot_digest, request_json,
                         role_profile_id, role_profile_revision,
@@ -785,6 +780,7 @@ impl RuntimeStore {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_patch_attempt_with_provenance(
         &self,
         change_id: &ChangeId,

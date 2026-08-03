@@ -597,6 +597,7 @@ fn deterministic_role_profile(
     Ok(profile_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_request(
     store: &RuntimeStore,
     task_id: &str,
