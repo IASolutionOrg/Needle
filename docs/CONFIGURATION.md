@@ -43,8 +43,9 @@ Credentials are neither imported nor exported.
 ## Current agent-host scope
 
 Worker execution and orchestration currently use Codex only. The web control
-plane can edit Codex model policy and runtime bounds, but it does not yet manage
-named role profiles or configure another agent host.
+plane can edit Codex model policy, runtime bounds, and canonical named role
+profiles; role-profile changes remain configuration-only and do not bind a
+worker or session.
 
 The planned sequence is Codex-first role configuration and lifecycle
 orchestration, followed by configuration-only interoperability for Claude Code
@@ -89,10 +90,13 @@ projects to the existing `WorkerProfile` representation with `None`, while
 distinct from the role-profile definition/revision digest. Projection is
 explicit and does not read or modify `ModelPolicy`.
 
-The domain and SQLite migration are currently an offline persistence boundary:
-there is no HTTP/editor UI, session or worker binding, lifecycle executor, or
-automatic activation yet. Role profiles never carry credentials, host paths,
-or network access.
+The domain and SQLite migration remain an offline configuration boundary. The
+local HTTP/editor exposes bounded, authenticated routes for list/detail/history,
+audit, request-time preflight, draft CAS, and explicit activation/deactivation.
+Preflight is recomputed at request time and is never persisted. No endpoint
+launches a worker, binds a session, executes a lifecycle, or configures a
+non-Codex host. Role profiles never carry credentials, host paths, raw
+transcripts, or network access.
 
 ## Export and import
 

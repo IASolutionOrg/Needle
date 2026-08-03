@@ -63,6 +63,7 @@ This is a local development control plane, not a remotely hosted service.
 - Runs and Approval Inbox;
 - Changes;
 - Models;
+- Codex Role Profiles (under Models);
 - Experiments;
 - Settings.
 
@@ -76,8 +77,26 @@ build the embedded assets; the running Rust binary does not invoke Node.js.
 
 - `GET /api/v1/control-plane`;
 - route, settings, and model-policy mutations with `If-Match`;
+- bounded role-profile list/detail/history/audit routes:
+  `GET /api/v1/role-profiles`,
+  `GET /api/v1/role-profiles/{id}`,
+  `GET /api/v1/role-profiles/{id}/revisions`, and
+  `GET /api/v1/role-profiles/{id}/audit`;
+- request-time role-profile preflight and digest-bound draft/activation lifecycle:
+  `POST /api/v1/role-profiles/{id}/preflight`, `/draft`, `/activate`, and
+  `/deactivate`;
 - cache inspection and invalidation;
 - run, artifact, usage, and promotion views.
+
+Role-profile responses use `needle.role-profiles/1` and hard list/history/audit
+limits of 100 (smaller defaults). Mutation errors use
+`needle.role-profile-error/1` with machine-readable `code` and `message`.
+Preflight projects the canonical definition to a `WorkerProfile` digest without
+persisting preflight state. Draft, activation, and deactivation require the
+same-session CSRF boundary and an exact quoted `If-Match` state digest; 428
+means missing and 412 means stale. Activation additionally requires explicit
+confirmation of the selected revision and definition digest. The envelope is
+Codex configuration-only; non-Codex hosts are reported unavailable.
 
 ### Approvals
 

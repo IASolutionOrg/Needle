@@ -167,8 +167,8 @@ impl RuntimeStore {
                 resulting_state: RoleProfileState::Draft,
                 prior_state_digest: Some(state.state_digest),
                 resulting: &next_state,
-                prior_active_revision: None,
-                prior_active_digest: None,
+                prior_active_revision: state.active_revision,
+                prior_active_digest: state.active_definition_digest,
                 now,
             },
         )?;
@@ -286,6 +286,52 @@ impl RuntimeStore {
         Ok(revisions)
     }
 
+    pub fn list_role_profile_revisions_bounded(
+        &self,
+        profile_id: &needle_core::RoleProfileId,
+        limit: usize,
+    ) -> Result<(Vec<RoleProfileRevision>, u64), StoreError> {
+        if limit == 0 || limit > 100 {
+            return Err(StoreError::RoleProfileValidation(
+                "role-profile revision list limit must be between 1 and 100".to_owned(),
+            ));
+        }
+        self.initialize()?;
+        let connection = self.connection()?;
+        let state = load_state(&connection, profile_id.as_str())?;
+        let mut statement = connection.prepare(
+            "SELECT revision, definition_json, definition_digest, created_unix_ms, activated_unix_ms
+             FROM role_profile_revisions WHERE profile_id=?1 ORDER BY revision DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![profile_id.as_str(), limit as u64], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, Option<u64>>(4)?,
+            ))
+        })?;
+        let mut revisions = Vec::new();
+        for row in rows {
+            let (revision, json, digest, created, activated) = row?;
+            let definition = parse_definition(&json, &digest, profile_id.as_str())?;
+            revisions.push(revision_with_state(
+                profile_id.clone(),
+                revision,
+                definition,
+                derived_revision_state(&state, revision),
+                created,
+                activated,
+            )?);
+        }
+        if revisions.is_empty() {
+            return Err(StoreError::RoleProfileNotFound(profile_id.to_string()));
+        }
+        revisions.reverse();
+        Ok((revisions, state.latest_revision))
+    }
+
     pub fn role_profile_state(
         &self,
         profile_id: &needle_core::RoleProfileId,
@@ -293,6 +339,30 @@ impl RuntimeStore {
         self.initialize()?;
         let connection = self.connection()?;
         load_state(&connection, profile_id.as_str())
+    }
+
+    /// Return a deterministic, bounded snapshot of persisted role-profile states.
+    ///
+    /// The state loader performs all identity, revision, digest, and pointer checks, so
+    /// corruption is surfaced to the caller instead of being hidden by a partial list.
+    pub fn list_role_profile_states(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RoleProfileStateRecord>, StoreError> {
+        if limit > 100 {
+            return Err(StoreError::RoleProfileValidation(
+                "role-profile list limit must be at most 100".to_owned(),
+            ));
+        }
+        self.initialize()?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT profile_id FROM role_profiles ORDER BY profile_id ASC LIMIT ?1")?;
+        let ids = statement
+            .query_map([limit as u64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        ids.into_iter().map(|id| load_state(&connection, &id)).collect()
     }
 
     pub fn read_active_role_profile(

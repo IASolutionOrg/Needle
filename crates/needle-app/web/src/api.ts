@@ -125,6 +125,15 @@ export interface ControlPlane {
   settings_digest: string | null
   model_policy: ModelPolicy | null
   model_policy_digest: string | null
+  role_profiles?: {
+    schema: string
+    status: "configuration_only"
+    capability: "codex"
+    codex: { available: boolean; execution_binding: boolean }
+    non_codex: { available: boolean; reason: string }
+    items: RoleProfileSummary[]
+    bounded: { limit: number }
+  }
   cache: Array<{
     identity_digest: string
     logical_digest: string
@@ -473,6 +482,179 @@ export interface WorkerProfile {
   definition_digest: string
 }
 
+export type RoleProfileRole =
+  | "explorer"
+  | "implementer"
+  | "test_runner"
+  | "reviewer"
+  | "verifier"
+  | "auditor"
+export type RoleProfileReasoning = "low" | "medium" | "high" | "xhigh"
+export type RoleProfileServiceTier = "default" | "priority"
+export type RoleProfileHost = "codex"
+
+export interface RoleProfileBudget {
+  max_turns: number
+  max_output_tokens: number
+  max_cost_microusd: number
+}
+
+export interface RoleProfileDefinitionInput {
+  profile_id: string
+  role: RoleProfileRole
+  host: RoleProfileHost
+  model: string
+  reasoning: RoleProfileReasoning
+  service_tier: RoleProfileServiceTier
+  timeout_seconds: number
+  budget: RoleProfileBudget
+  prompt_profile_digest: string
+  output_contract_digest: string
+  tool_policy: "read_only" | "isolated_write"
+  command_policy: "denied" | "read_only" | "certified_tests"
+  filesystem_policy: "read_only_checkout" | "disposable_checkout"
+  network_policy: "denied"
+  test_policy: "disabled" | "certified"
+  repair_policy: "none" | "once"
+  fallback_policy: "disabled" | "native"
+  concurrency: number
+  route_assignments: string[]
+}
+
+export interface RoleProfileDefinition extends RoleProfileDefinitionInput {
+  definition_digest: string
+}
+
+export type RoleProfileState = "draft" | "active" | "inactive"
+
+export interface RoleProfilePreflightSummary {
+  passed: boolean
+  failures: string[]
+  worker_profile_digest: string | null
+}
+
+export interface RoleProfileSummary {
+  profile_id: string
+  role: RoleProfileRole
+  host: RoleProfileHost
+  latest_revision: number
+  latest_definition_digest: string
+  active_revision: number | null
+  active_definition_digest: string | null
+  state: RoleProfileState
+  state_digest: string
+  updated_unix_ms: number
+}
+
+export interface RoleProfileRevisionSummary {
+  revision: number
+  definition_digest: string
+  role: RoleProfileRole
+  host: RoleProfileHost
+  model: string
+  reasoning: RoleProfileReasoning
+  service_tier: RoleProfileServiceTier
+  state: RoleProfileState
+  created_unix_ms: number
+  activated_unix_ms: number | null
+}
+
+export interface RoleProfileDetail {
+  profile_id: string
+  revision: number
+  state: RoleProfileState
+  definition: RoleProfileDefinition
+  definition_digest: string
+  worker_profile: WorkerProfile | null
+  worker_profile_digest: string | null
+  preflight: RoleProfilePreflightSummary
+  created_unix_ms: number
+  activated_unix_ms: number | null
+  state_digest: string
+  latest_revision: number
+  latest_definition_digest: string
+  active_revision: number | null
+  active_definition_digest: string | null
+  updated_unix_ms: number
+}
+
+export interface RoleProfileAuditSummary {
+  audit_id: number
+  profile_id: string
+  revision: number
+  definition_digest: string
+  operation: "create" | "revise" | "activate" | "deactivate"
+  prior_state: RoleProfileState | null
+  resulting_state: RoleProfileState
+  prior_state_digest: string | null
+  resulting_state_digest: string
+  prior_active_revision: number | null
+  prior_active_digest: string | null
+  resulting_active_revision: number | null
+  resulting_active_digest: string | null
+  created_unix_ms: number
+}
+
+export interface RoleProfileListResponse {
+  schema: string
+  items: RoleProfileSummary[]
+  limit: number
+}
+
+export interface RoleProfileDetailResponse {
+  schema: string
+  profile: RoleProfileDetail
+}
+
+export interface RoleProfileRevisionsResponse {
+  schema: string
+  profile_id: string
+  items: RoleProfileRevisionSummary[]
+  limit: number
+  total: number
+}
+
+export interface RoleProfileAuditResponse {
+  schema: string
+  profile_id: string
+  items: RoleProfileAuditSummary[]
+  limit: number
+}
+
+export interface RoleProfilePreflightResponse {
+  schema: string
+  profile_id?: string
+  operation: "create" | "revise" | "activate" | "invalid"
+  passed: boolean
+  failures: string[]
+  if_match?: string
+  definition: RoleProfileDefinition | null
+  definition_digest: string | null
+  worker_profile: WorkerProfile | null
+  worker_profile_digest: string | null
+}
+
+export interface RoleProfileMutationResponse {
+  schema: string
+  operation: "create" | "revise" | "activate" | "deactivate"
+  profile: RoleProfileDetail
+  state_digest: string
+}
+
+export class RoleProfileApiError extends Error {
+  readonly status: number
+  readonly code: string
+  readonly body: unknown
+
+  constructor(status: number, code: string, message: string, body?: unknown) {
+    super(message)
+    this.name = "RoleProfileApiError"
+    this.status = status
+    this.code = code
+    this.body = body
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { credentials: "same-origin" })
   if (!response.ok) {
@@ -481,12 +663,209 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function roleProfileJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
+  })
+  if (response.ok) return (await response.json()) as T
+  const body = (await response.json().catch(() => null)) as {
+    code?: string
+    message?: string
+    error?: string
+  } | null
+  throw new RoleProfileApiError(
+    response.status,
+    body?.code ?? "request_failed",
+    body?.message ?? body?.error ?? `Role-profile request failed with ${response.status}`,
+    body,
+  )
+}
+
 function csrfToken() {
   return (
     document
       .querySelector<HTMLMetaElement>('meta[name="needle-csrf"]')
       ?.getAttribute("content") ?? ""
   )
+}
+
+function roleProfileHeaders(digest?: string) {
+  return {
+    "content-type": "application/json",
+    "x-csrf-token": csrfToken(),
+    ...(digest ? { "if-match": `"${digest}"` } : {}),
+  }
+}
+
+function invalidateRoleProfileQueries(queryClient: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["role-profiles"] }),
+    queryClient.invalidateQueries({ queryKey: ["role-profile"] }),
+    queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
+  ])
+}
+
+function refreshAfterRoleProfileConflict(
+  queryClient: ReturnType<typeof useQueryClient>,
+  error: unknown,
+) {
+  if (error instanceof RoleProfileApiError && (error.status === 409 || error.status === 412)) {
+    return Promise.all([
+      invalidateRoleProfileQueries(queryClient),
+      queryClient.refetchQueries({ queryKey: ["role-profile"] }),
+    ]).then(() => undefined)
+  }
+  return Promise.resolve()
+}
+
+export function useRoleProfiles() {
+  return useQuery({
+    queryKey: ["role-profiles"],
+    queryFn: () => roleProfileJson<RoleProfileListResponse>("/api/v1/role-profiles"),
+  })
+}
+
+export function useRoleProfile(profileId: string | undefined, revision?: number) {
+  const query = revision == null ? "" : `?revision=${revision}`
+  return useQuery({
+    queryKey: ["role-profile", profileId, revision ?? "latest"],
+    queryFn: () =>
+      roleProfileJson<RoleProfileDetailResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId ?? "")}${query}`,
+      ),
+    enabled: Boolean(profileId),
+  })
+}
+
+export function useRoleProfileRevisions(profileId: string | undefined) {
+  return useQuery({
+    queryKey: ["role-profile", profileId, "revisions"],
+    queryFn: () =>
+      roleProfileJson<RoleProfileRevisionsResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId ?? "")}/revisions`,
+      ),
+    enabled: Boolean(profileId),
+  })
+}
+
+export function useRoleProfileAudit(profileId: string | undefined) {
+  return useQuery({
+    queryKey: ["role-profile", profileId, "audit"],
+    queryFn: () =>
+      roleProfileJson<RoleProfileAuditResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId ?? "")}/audit`,
+      ),
+    enabled: Boolean(profileId),
+  })
+}
+
+export function useRoleProfilePreflight() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, input }: { profileId: string; input: RoleProfileDefinitionInput }) =>
+      roleProfileJson<RoleProfilePreflightResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId)}/preflight`,
+        {
+          method: "POST",
+          headers: roleProfileHeaders(),
+          body: JSON.stringify(input),
+        },
+      ),
+    onError: (error) => refreshAfterRoleProfileConflict(queryClient, error),
+  })
+}
+
+export function useRoleProfileDraft() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      input,
+      stateDigest,
+    }: {
+      profileId: string
+      input: RoleProfileDefinitionInput
+      stateDigest: string
+    }) =>
+      roleProfileJson<RoleProfileMutationResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId)}/draft`,
+        {
+          method: "POST",
+          headers: roleProfileHeaders(stateDigest),
+          body: JSON.stringify(input),
+        },
+      ),
+    onSuccess: (_, variables) =>
+      Promise.all([
+        invalidateRoleProfileQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["role-profile", variables.profileId] }),
+      ]),
+    onError: (error) => refreshAfterRoleProfileConflict(queryClient, error),
+  })
+}
+
+export function useRoleProfileActivate() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      revision,
+      definitionDigest,
+      stateDigest,
+    }: {
+      profileId: string
+      revision: number
+      definitionDigest: string
+      stateDigest: string
+    }) =>
+      roleProfileJson<RoleProfileMutationResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId)}/activate`,
+        {
+          method: "POST",
+          headers: roleProfileHeaders(stateDigest),
+          body: JSON.stringify({ revision, definition_digest: definitionDigest, confirm: true }),
+        },
+      ),
+    onSuccess: (_, variables) =>
+      Promise.all([
+        invalidateRoleProfileQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["role-profile", variables.profileId] }),
+      ]),
+    onError: (error) => refreshAfterRoleProfileConflict(queryClient, error),
+  })
+}
+
+export function useRoleProfileDeactivate() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      activeDefinitionDigest,
+      stateDigest,
+    }: {
+      profileId: string
+      activeDefinitionDigest: string
+      stateDigest: string
+    }) =>
+      roleProfileJson<RoleProfileMutationResponse>(
+        `/api/v1/role-profiles/${encodeURIComponent(profileId)}/deactivate`,
+        {
+          method: "POST",
+          headers: roleProfileHeaders(stateDigest),
+          body: JSON.stringify({
+            active_definition_digest: activeDefinitionDigest,
+            confirm: true,
+          }),
+        },
+      ),
+    onSuccess: (_, variables) =>
+      Promise.all([
+        invalidateRoleProfileQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["role-profile", variables.profileId] }),
+      ]),
+    onError: (error) => refreshAfterRoleProfileConflict(queryClient, error),
+  })
 }
 
 export function useControlPlane() {

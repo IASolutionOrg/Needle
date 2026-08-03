@@ -42,6 +42,32 @@ fn definition(id: &str) -> RoleProfileDefinition {
     .unwrap()
 }
 
+fn definition_with_model(id: &str, model: &str) -> RoleProfileDefinition {
+    let base = definition(id);
+    RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: base.profile_id,
+        role: base.role,
+        host: base.host,
+        model: model.to_owned(),
+        reasoning: base.reasoning,
+        service_tier: base.service_tier,
+        timeout_seconds: base.timeout_seconds,
+        budget: base.budget,
+        prompt_profile_digest: base.prompt_profile_digest,
+        output_contract_digest: base.output_contract_digest,
+        tool_policy: base.tool_policy,
+        command_policy: base.command_policy,
+        filesystem_policy: base.filesystem_policy,
+        network_policy: base.network_policy,
+        test_policy: base.test_policy,
+        repair_policy: base.repair_policy,
+        fallback_policy: base.fallback_policy,
+        concurrency: base.concurrency,
+        route_assignments: base.route_assignments,
+    })
+    .unwrap()
+}
+
 #[test]
 fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
     let (path, store) = temporary_store();
@@ -187,6 +213,66 @@ fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
         Err(StoreError::RoleProfileValidation(_))
     ));
     drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn bounded_revision_listing_reads_only_the_latest_ordered_window() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("explorer.default")).unwrap();
+    let id = first.profile_id.clone();
+    let mut state = store.role_profile_state(&id).unwrap();
+    for model in ["gpt-5-mini", "gpt-5-pro", "gpt-4.1", "gpt-4.1-mini"] {
+        let revision = store
+            .revise_role_profile(
+                &id,
+                state.state_digest,
+                definition_with_model("explorer.default", model),
+            )
+            .unwrap();
+        assert_eq!(revision.revision, state.latest_revision + 1);
+        state = store.role_profile_state(&id).unwrap();
+    }
+    let (revisions, total) = store.list_role_profile_revisions_bounded(&id, 2).unwrap();
+    assert_eq!(total, 5);
+    assert_eq!(revisions.iter().map(|value| value.revision).collect::<Vec<_>>(), vec![4, 5]);
+    assert_eq!(revisions[0].definition.model, "gpt-4.1");
+    assert_eq!(revisions[1].definition.model, "gpt-4.1-mini");
+    assert!(matches!(
+        store.list_role_profile_revisions_bounded(&id, 0),
+        Err(StoreError::RoleProfileValidation(_))
+    ));
+    assert!(matches!(
+        store.list_role_profile_revisions_bounded(&id, 101),
+        Err(StoreError::RoleProfileValidation(_))
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn revising_an_active_profile_preserves_prior_active_audit_pointer() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("explorer.default")).unwrap();
+    let id = first.profile_id.clone();
+    let state = store.role_profile_state(&id).unwrap();
+    let active = store.activate_role_profile(&id, 1, state.state_digest).unwrap();
+    let active_state = store.role_profile_state(&id).unwrap();
+    let revised = store
+        .revise_role_profile(
+            &id,
+            active_state.state_digest,
+            definition_with_model("explorer.default", "gpt-5-mini"),
+        )
+        .unwrap();
+    assert_eq!(revised.revision, 2);
+    let audit = store.read_role_profile_audit(&id, 100).unwrap();
+    let revise_audit =
+        audit.iter().find(|record| record.operation == RoleProfileAuditOperation::Revise).unwrap();
+    assert_eq!(revise_audit.prior_active_revision, Some(1));
+    assert_eq!(revise_audit.prior_active_digest, Some(active.definition.definition_digest));
+    let next_state = store.role_profile_state(&id).unwrap();
+    assert_eq!(next_state.active_revision, Some(1));
+    assert_eq!(next_state.latest_revision, 2);
     let _ = std::fs::remove_file(path);
 }
 
@@ -389,5 +475,32 @@ fn role_profile_persistence_does_not_mutate_settings_or_model_policy() {
     store.create_role_profile(definition("explorer.default")).unwrap();
     assert_eq!(store.settings().unwrap(), before_settings);
     assert_eq!(store.model_policy().unwrap(), before_policy);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn bounded_state_listing_is_sorted_and_fails_closed_on_corruption() {
+    let (path, store) = temporary_store();
+    store.create_role_profile(definition("zeta")).unwrap();
+    store.create_role_profile(definition("alpha")).unwrap();
+    let listed = store.list_role_profile_states(100).unwrap();
+    assert_eq!(
+        listed.iter().map(|state| state.profile_id.as_str()).collect::<Vec<_>>(),
+        vec!["alpha", "zeta"]
+    );
+    assert!(matches!(
+        store.list_role_profile_states(101),
+        Err(StoreError::RoleProfileValidation(_))
+    ));
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    connection
+        .execute("UPDATE role_profile_state SET latest_revision=99 WHERE profile_id='alpha'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.list_role_profile_states(100),
+        Err(StoreError::RoleProfileCorruption(_))
+    ));
     let _ = std::fs::remove_file(path);
 }

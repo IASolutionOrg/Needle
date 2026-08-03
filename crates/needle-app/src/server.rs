@@ -28,6 +28,9 @@ use std::time::Duration;
 
 use crate::runtime_instance::InstanceGuard;
 
+#[path = "server/role_profiles.rs"]
+mod role_profiles;
+
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
 struct WebAssets;
@@ -217,7 +220,8 @@ pub(crate) fn run(data_directory: PathBuf, repository_root: PathBuf) -> Result<(
             .route("/api/v1/changes/{id}", get(get_change))
             .route("/api/v1/changes/{id}/diff", get(get_change_diff))
             .route("/api/v1/changes/{id}/apply", post(apply_change))
-            .route("/api/v1/control-plane", get(control_plane))
+            .route("/api/v1/control-plane", get(control_plane));
+        let app = role_profiles::routes(app)
             .fallback(get(static_asset))
             .with_state(state.clone())
             .layer(middleware::from_fn_with_state(state.clone(), security));
@@ -337,6 +341,10 @@ async fn control_plane(State(state): State<AppState>) -> Response {
     let model_policy = state.store.model_policy().ok();
     let model_policy_digest =
         model_policy.as_ref().and_then(|value| configuration_digest(value).ok());
+    let role_profiles = match role_profiles::control_plane_envelope(&state.store) {
+        Ok(role_profiles) => role_profiles,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
     let route_promotions = state.store.route_promotions().unwrap_or_default();
     let change_records = match state.store.changes(50) {
         Ok(changes) => changes,
@@ -478,6 +486,7 @@ async fn control_plane(State(state): State<AppState>) -> Response {
         "pending_approvals": approvals.len(),
         "model_policy": model_policy,
         "model_policy_digest": model_policy_digest,
+        "role_profiles": role_profiles,
         "route_promotions": route_promotions,
         "changes": change_workflows,
         "semantic": {
