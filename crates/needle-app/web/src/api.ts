@@ -215,6 +215,21 @@ export interface VerificationArtifact {
   }>
   findings: string[]
   test_evidence_ids: string[]
+  /** Additive v2 projection; old artifacts omit this field. */
+  test_plan_results?: Array<{
+    plan_digest: string
+    runner: string
+    argv: string[]
+    cwd_relative: string
+    test_identifier: string
+    expected: boolean
+    available: boolean
+    executed: boolean
+    passed: boolean
+    evidence_id?: string | null
+    failure_reason?: string | null
+  }>
+  test_plans_over_cap?: boolean
   verifier_definition: string
   created_unix_ms: number
 }

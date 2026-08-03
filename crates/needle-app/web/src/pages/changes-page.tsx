@@ -152,6 +152,42 @@ function ChangeDetailPage({ changeId }: { changeId: string }) {
               </div>
               <Badge variant="outline">{record.verification?.verdict ?? "not_requested"}</Badge>
             </div>
+            {record.verification?.test_plans_over_cap ? (
+              <p className="mt-3 text-sm text-destructive">
+                The certified plan set exceeded the verifier bound; no test subset was executed.
+              </p>
+            ) : null}
+            {record.verification?.test_plan_results?.length ? (
+              <div className="mt-4 overflow-x-auto">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Certified plans
+                </h3>
+                <Table className="mt-2">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Plan</TableHead>
+                      <TableHead>Available</TableHead>
+                      <TableHead>Executed</TableHead>
+                      <TableHead>Passed</TableHead>
+                      <TableHead>Evidence / reason</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {record.verification.test_plan_results.map((plan) => (
+                      <TableRow key={plan.plan_digest}>
+                        <TableCell className="font-mono text-xs">{plan.test_identifier}</TableCell>
+                        <TableCell>{plan.available ? "yes" : "no"}</TableCell>
+                        <TableCell>{plan.executed ? "yes" : "no"}</TableCell>
+                        <TableCell>{plan.passed ? "yes" : "no"}</TableCell>
+                        <TableCell className="max-w-80 truncate text-xs">
+                          {plan.evidence_id ?? plan.failure_reason ?? "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : null}
             <List title="Findings" values={record.verification?.findings ?? []} empty="No findings" />
           </section>
 

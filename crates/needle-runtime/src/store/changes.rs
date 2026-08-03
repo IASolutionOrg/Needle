@@ -1122,6 +1122,8 @@ mod tests {
             acceptance_coverage: coverage,
             findings,
             test_evidence_ids: Vec::new(),
+            test_plan_results: Vec::new(),
+            test_plans_over_cap: false,
             verifier_definition: definition,
             created_unix_ms: 1,
         };

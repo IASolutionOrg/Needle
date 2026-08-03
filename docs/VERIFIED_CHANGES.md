@@ -95,8 +95,9 @@ or publish.
 - final content at most 1 MiB;
 - UTF-8 regular files only;
 - no binary, symlink, submodule, or rename support;
-- verifier automation supports at most one distinct associated certified test
-  plan;
+- verifier automation supports a deterministic, serial set of up to four
+  distinct associated certified test plans; exact duplicates collapse to one
+  execution and over-cap or unavailable plans fail closed;
 - no patch reuse or three-way merge.
 
 ## Evidence boundary

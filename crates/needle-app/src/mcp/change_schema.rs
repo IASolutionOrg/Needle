@@ -2,7 +2,7 @@ use needle_core::{
     AcceptanceCoverage, AllowedPath, AllowedPathScope, ArtifactId, CanonicalHasher, ChangeId,
     ChangeRequest, ClaimId, Digest, MAX_ACCEPTANCE_CRITERIA, MAX_ALLOWED_PATHS,
     MAX_CHANGE_ARTIFACTS, MAX_CHANGE_CLAIMS, MAX_CHANGE_TASK_BYTES, MAX_PATCH_FILES,
-    PatchOperation, VerificationStatus,
+    PatchOperation, VerificationPlanResult, VerificationStatus,
 };
 use needle_platform_codex::{PrepareChangeOutcome, VerifyChangeOutcome};
 use serde::{Deserialize, Serialize};
@@ -330,6 +330,8 @@ pub(crate) struct McpVerifyChangeResponse {
     pub acceptance_coverage: Vec<AcceptanceCoverage>,
     pub findings: Vec<String>,
     pub test_evidence_ids: Vec<String>,
+    pub test_plan_results: Vec<VerificationPlanResult>,
+    pub test_plans_over_cap: bool,
     pub verifier_started: bool,
     pub repair_attempted: bool,
     pub repair_performed: bool,
@@ -351,6 +353,8 @@ impl McpVerifyChangeResponse {
             acceptance_coverage: outcome.artifact.acceptance_coverage,
             findings: outcome.artifact.findings,
             test_evidence_ids: outcome.artifact.test_evidence_ids,
+            test_plan_results: outcome.artifact.test_plan_results,
+            test_plans_over_cap: outcome.artifact.test_plans_over_cap,
             verifier_started: outcome.verifier_started,
             repair_attempted,
             repair_performed,
@@ -411,7 +415,28 @@ pub(crate) fn verify_output_schema() -> Value {
                 }
             },
             "findings": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
-            "test_evidence_ids": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
+            "test_evidence_ids": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
+            "test_plan_results": {
+                "type": "array", "maxItems": 4,
+                "items": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": {
+                        "plan_digest": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"},
+                        "runner": {"type": "string"},
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd_relative": {"type": "string"},
+                        "test_identifier": {"type": "string"},
+                        "expected": {"type": "boolean"},
+                        "available": {"type": "boolean"},
+                        "executed": {"type": "boolean"},
+                        "passed": {"type": "boolean"},
+                        "evidence_id": {"type": ["string", "null"]},
+                        "failure_reason": {"type": ["string", "null"]}
+                    },
+                    "required": ["plan_digest", "runner", "argv", "cwd_relative", "test_identifier", "expected", "available", "executed", "passed"],
+                }
+            },
+            "test_plans_over_cap": {"type": "boolean"},
             "verifier_started": {"type": "boolean"},
             "repair_attempted": {"type": "boolean"},
             "repair_performed": {"type": "boolean"},
@@ -419,7 +444,7 @@ pub(crate) fn verify_output_schema() -> Value {
         },
         "required": [
             "status", "change_id", "patch_id", "verification_id", "acceptance_coverage",
-            "findings", "test_evidence_ids", "verifier_started", "repair_attempted",
+            "findings", "test_evidence_ids", "test_plan_results", "test_plans_over_cap", "verifier_started", "repair_attempted",
             "repair_performed", "verification_attempts"
         ],
         "additionalProperties": false
