@@ -14,11 +14,13 @@ needle mcp serve \
   --data-dir <profile-data-directory> \
   --repository <repository-root> \
   --main-model <main-model> \
+  --role-profile <active-role-profile-id> \
   --cache-only
 ```
 
 The connection freezes repository, profile, enabled routes, semantic-definition
-digest, main model, and worker policy. `--cache-only` disables worker fallback
+digest, main model, selected role-profile revision, and worker policy. The
+role-profile selector is mandatory. `--cache-only` disables worker fallback
 and change tools.
 
 The stdio server accepts bounded JSON-RPC lines and requires `initialize`

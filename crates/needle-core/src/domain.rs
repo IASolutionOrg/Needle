@@ -1,6 +1,7 @@
 use crate::{
     ArtifactKind, Digest, HARD_RESULT_BYTES, HARD_RESULT_TOKENS, NeedFragment, NeedKey,
-    SemanticArtifactResult, TestPlan, WorkerArtifactResult, normalize_line_endings,
+    RoleProfileProvenance, SemanticArtifactResult, TestPlan, WorkerArtifactResult,
+    normalize_line_endings,
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,18 +107,29 @@ pub struct WorkerConfig {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub evidence_failure_policy: EvidenceFailurePolicy,
+    #[serde(default)]
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 impl WorkerConfig {
     pub fn digest(&self) -> Digest {
         Digest::blake3(format!(
-            "needle-worker-config\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "needle-worker-config\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
             self.executable,
             self.model,
             self.reasoning,
             self.service_tier.as_deref().unwrap_or_default(),
             self.timeout_seconds,
             self.evidence_failure_policy.as_str(),
+            self.role_profile_provenance
+                .as_ref()
+                .map(|provenance| {
+                    format!(
+                        "{}@{}#{}",
+                        provenance.profile_id, provenance.revision, provenance.definition_digest
+                    )
+                })
+                .unwrap_or_default(),
         ))
     }
 }
@@ -186,6 +198,8 @@ pub struct WorkerOutcome {
     pub worker_session_id: Option<String>,
     #[serde(default)]
     pub session_cleanup_success: Option<bool>,
+    #[serde(default)]
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 const fn one_u32() -> u32 {
@@ -208,6 +222,8 @@ pub struct WorkerFailure {
     pub discarded_facts: u32,
     pub worker_session_id: Option<String>,
     pub session_cleanup_success: Option<bool>,
+    #[serde(default)]
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -338,12 +354,14 @@ pub struct NeedCacheIdentity {
     pub normalized_request_digest: Digest,
     pub worker_configuration_digest: Digest,
     pub output_schema_digest: Digest,
+    #[serde(default)]
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 impl NeedCacheIdentity {
     pub fn digest(&self) -> Digest {
         Digest::blake3(format!(
-            "needle-cache-identity\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "needle-cache-identity\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
             self.repository_id,
             self.source_snapshot_digest,
             self.prompt_profile_digest,
@@ -353,12 +371,13 @@ impl NeedCacheIdentity {
             self.normalized_request_digest,
             self.worker_configuration_digest,
             self.output_schema_digest,
+            provenance_identity(self.role_profile_provenance.as_ref()),
         ))
     }
 
     pub fn logical_digest(&self) -> Digest {
         Digest::blake3(format!(
-            "needle-cache-logical\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "needle-cache-logical\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
             self.repository_id,
             self.prompt_profile_digest,
             self.route_definition_digest,
@@ -367,8 +386,15 @@ impl NeedCacheIdentity {
             self.normalized_request_digest,
             self.worker_configuration_digest,
             self.output_schema_digest,
+            provenance_identity(self.role_profile_provenance.as_ref()),
         ))
     }
+}
+
+fn provenance_identity(provenance: Option<&RoleProfileProvenance>) -> String {
+    provenance
+        .map(|value| format!("{}@{}#{}", value.profile_id, value.revision, value.definition_digest))
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -7,7 +7,10 @@ use needle_bench::{
     evaluate_pilot_pair, parse_codex_jsonl, parse_jsonl, parse_task_fixture, redact_jsonl,
 };
 use needle_core::{
-    Digest, EvidenceFailurePolicy, FORMAT_REVISION, NeedKey, NeedRequest, TestPlan, WorkerConfig,
+    CodexHost, CodexRole, CommandPolicy, Digest, EvidenceFailurePolicy, FORMAT_REVISION,
+    FallbackPolicy, FilesystemPolicy, NeedKey, NeedRequest, NetworkPolicy, ReasoningLevel,
+    RepairPolicy, RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput,
+    RoleProfileId, ServiceTier, TestPlan, TestPolicy, ToolPolicy, WorkerConfig,
 };
 use needle_platform_codex::{
     CodexWorker, CompactInput, HookConfig, SessionEndInput, SessionStartInput, StopInput,
@@ -508,15 +511,33 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
             if let Some(session_id) = parsed.session_id.as_deref() {
                 let store = hook_runtime_store()?;
                 let profile_digest = config.profile()?.definition_digest;
-                if let Err(error) = store.initialize().and_then(|_| {
-                    store.record_session_start(
-                        session_id,
-                        profile_digest,
-                        parsed.model.as_deref(),
-                        parsed.cwd.as_deref(),
-                    )
-                }) {
-                    eprintln!("needle: cannot record product session ({error}); fail-open");
+                let selector = env::var("NEEDLE_ROLE_PROFILE_ID").ok();
+                let result = match selector {
+                    Some(value) => match RoleProfileId::new(value) {
+                        Ok(profile_id) => store.initialize().and_then(|_| {
+                            store.record_session_start_profiled(
+                                session_id,
+                                profile_digest,
+                                parsed.model.as_deref(),
+                                parsed.cwd.as_deref(),
+                                &profile_id,
+                            )
+                        }),
+                        Err(error) => Err(needle_runtime::StoreError::RoleProfileValidation(
+                            error.to_string(),
+                        )),
+                    },
+                    None => {
+                        eprintln!(
+                            "needle: NEEDLE_ROLE_PROFILE_ID is missing; session provenance is unknown"
+                        );
+                        Ok(())
+                    }
+                };
+                if let Err(error) = result {
+                    eprintln!(
+                        "needle: cannot record profiled product session ({error}); fail-open"
+                    );
                 }
             }
             serde_json::to_value(output)?
@@ -675,6 +696,10 @@ fn run_mcp(arguments: Vec<String>) -> Result<(), AppError> {
             .or_else(|| env::var("NEEDLE_MCP_MAIN_MODEL").ok())
             .unwrap_or_else(|| "unknown".to_owned());
         validate_model_value(&main_model, "main model")?;
+        let role_profile = required_value(&arguments, "--role-profile").and_then(|value| {
+            RoleProfileId::new(value)
+                .map_err(|error| AppError::Usage(format!("invalid role profile: {error}")))
+        })?;
         return mcp::serve(mcp::ProductMcpConfig {
             data_directory,
             repository_root,
@@ -682,12 +707,13 @@ fn run_mcp(arguments: Vec<String>) -> Result<(), AppError> {
             cache_only: arguments.iter().any(|argument| argument == "--cache-only"),
             calibration_reuse: env::var("NEEDLE_INTERNAL_CALIBRATION_REUSE").as_deref()
                 == Ok("partial-tests-live"),
+            role_profile_id: role_profile,
         })
         .map_err(AppError::Runtime);
     }
     if arguments.first().map(String::as_str) != Some("serve-benchmark") || arguments.len() != 1 {
         return Err(AppError::Usage(
-            "mcp serve [--data-dir <directory>] [--repository <root>] [--main-model <model>] [--cache-only] | mcp serve-benchmark"
+            "mcp serve --role-profile <id> [--data-dir <directory>] [--repository <root>] [--main-model <model>] [--cache-only] | mcp serve-benchmark"
                 .to_owned(),
         ));
     }
@@ -699,7 +725,7 @@ fn validate_mcp_serve_arguments(arguments: &[String]) -> Result<(), AppError> {
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--cache-only" => index += 1,
-            "--data-dir" | "--repository" | "--main-model" => {
+            "--data-dir" | "--repository" | "--main-model" | "--role-profile" => {
                 if arguments.get(index + 1).is_none() {
                     return Err(AppError::Usage(format!("{} requires a value", arguments[index])));
                 }
@@ -808,6 +834,7 @@ fn transport_preflight_run(arguments: &[String]) -> Result<(), AppError> {
         service_tier: Some(service_tier),
         timeout_seconds: 30,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let report = CodexWorker::new(&data_root)
         .preflight_transport(&config, &repository)
@@ -3056,6 +3083,77 @@ fn build_codex_resume_args(thread_id: &str, payload: &str) -> Result<Vec<String>
 
 fn validate_model_value(value: &str, label: &str) -> Result<(), AppError> {
     validate_slug(value, label)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provision_experiment_role_profile(
+    store: &RuntimeStore,
+    profile_id: &str,
+    prompt_profile_digest: Digest,
+    model: &str,
+    reasoning: &str,
+    service_tier: &str,
+    timeout_seconds: u64,
+    repair_once: bool,
+) -> Result<RoleProfileId, AppError> {
+    let reasoning = match reasoning {
+        "low" => ReasoningLevel::Low,
+        "medium" => ReasoningLevel::Medium,
+        "high" => ReasoningLevel::High,
+        "xhigh" => ReasoningLevel::Xhigh,
+        value => {
+            return Err(AppError::Experiment(format!(
+                "experiment role profile cannot represent reasoning `{value}`"
+            )));
+        }
+    };
+    let service_tier = match service_tier {
+        "default" => ServiceTier::Default,
+        "priority" => ServiceTier::Priority,
+        value => {
+            return Err(AppError::Experiment(format!(
+                "experiment role profile cannot represent service tier `{value}`"
+            )));
+        }
+    };
+    let profile_id =
+        RoleProfileId::new(profile_id).map_err(|error| AppError::Experiment(error.to_string()))?;
+    let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: profile_id.clone(),
+        role: CodexRole::Explorer,
+        host: CodexHost::Codex,
+        model: model.to_owned(),
+        reasoning,
+        service_tier,
+        timeout_seconds,
+        budget: RoleProfileBudget {
+            max_turns: 8,
+            max_output_tokens: 2000,
+            max_cost_microusd: 1_000_000_000,
+        },
+        prompt_profile_digest,
+        output_contract_digest: Digest::blake3(needle_core::ARTIFACT_RESULT_SCHEMA_ID),
+        tool_policy: ToolPolicy::ReadOnly,
+        command_policy: CommandPolicy::ReadOnly,
+        filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+        network_policy: NetworkPolicy::Denied,
+        test_policy: TestPolicy::Disabled,
+        repair_policy: if repair_once { RepairPolicy::Once } else { RepairPolicy::None },
+        fallback_policy: FallbackPolicy::Disabled,
+        concurrency: 1,
+        route_assignments: Vec::new(),
+    })
+    .map_err(|error| AppError::Experiment(error.to_string()))?;
+    let revision = store
+        .create_role_profile(definition)
+        .map_err(|error| AppError::Experiment(error.to_string()))?;
+    let state = store
+        .role_profile_state(&profile_id)
+        .map_err(|error| AppError::Experiment(error.to_string()))?;
+    store
+        .activate_role_profile(&profile_id, revision.revision, state.state_digest)
+        .map_err(|error| AppError::Experiment(error.to_string()))?;
+    Ok(profile_id)
 }
 
 fn parse_experiment_arm(value: &str) -> Result<ExperimentArm, AppError> {

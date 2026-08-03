@@ -9,7 +9,8 @@ use change_schema::{
 use needle_core::{
     CacheResolution, CanonicalHasher, Digest, MultiNeedPolicy, Need, NeedCoordination,
     NeedDelivery, NeedStep, NeedStepRelation, NeedStepState, PredicateKind,
-    ReuseSufficiencyCertificateId, VerificationStatus, classify_need_step,
+    ReuseSufficiencyCertificateId, RoleProfileId, RoleProfileProvenance, VerificationStatus,
+    classify_need_step,
 };
 use needle_platform_codex::{CodexPatchWorker, CodexVerifier, PatchContextItem};
 use needle_runtime::{
@@ -87,6 +88,7 @@ pub(crate) struct ProductMcpConfig {
     pub(crate) main_model: String,
     pub(crate) cache_only: bool,
     pub(crate) calibration_reuse: bool,
+    pub(crate) role_profile_id: RoleProfileId,
 }
 
 pub(crate) fn serve(config: ProductMcpConfig) -> Result<(), String> {
@@ -445,6 +447,7 @@ struct ProductMcpServer {
     repository_lineage: Digest,
     main_model: String,
     session_id: String,
+    role_profile_provenance: RoleProfileProvenance,
     next_turn: u64,
     protocol: Option<NegotiatedProtocol>,
     initialized: bool,
@@ -511,7 +514,7 @@ impl ProductMcpServer {
         let profile_digest = Digest::blake3(b"needle.mcp-json-profile/1");
         resolver
             .store()
-            .record_session_start_for_transport(
+            .record_session_start_for_transport_profiled(
                 &session_id,
                 profile_digest,
                 Some(&config.main_model),
@@ -519,14 +522,18 @@ impl ProductMcpServer {
                 "mcp",
                 transport_definition_digest,
                 None,
+                &config.role_profile_id,
             )
             .map_err(|error| error.to_string())?;
-        let policy = resolver
+        let session = resolver
             .store()
             .session(&session_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "MCP session was not persisted".to_owned())?
-            .multi_need_policy;
+            .ok_or_else(|| "MCP session was not persisted".to_owned())?;
+        let policy = session.multi_need_policy;
+        let role_profile_provenance = session
+            .role_profile_provenance
+            .ok_or_else(|| "MCP session role-profile provenance was not persisted".to_owned())?;
         Ok(Self {
             resolver,
             cancellation,
@@ -534,6 +541,7 @@ impl ProductMcpServer {
             repository_lineage: snapshot.repository_id,
             main_model: config.main_model,
             session_id,
+            role_profile_provenance,
             next_turn: 1,
             protocol: None,
             initialized: false,
@@ -839,6 +847,7 @@ impl ProductMcpServer {
             &mapped.request.route,
             relation,
             &outcome,
+            &self.role_profile_provenance,
         ) {
             return tool_error(id, &format!("cannot persist MCP observation: {error}"));
         }
@@ -865,17 +874,23 @@ impl ProductMcpServer {
             Ok(settings) => settings,
             Err(error) => return tool_error(id, &format!("cannot load worker settings: {error}")),
         };
+        let worker_config = match self
+            .resolver
+            .store()
+            .resolve_session_worker_config(&self.session_id, settings.codex_executable.clone())
+        {
+            Ok(config) => config,
+            Err(error) => {
+                return tool_error(id, &format!("cannot resolve role-profile config: {error}"));
+            }
+        };
         let patcher = CodexPatchWorker::new(self.resolver.data_directory())
             .with_cancellation(Arc::clone(&self.cancellation));
-        let outcome = match patcher.prepare(
-            &settings.worker_config(),
-            &self.repository_root,
-            &request,
-            &context,
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => return tool_error(id, &error),
-        };
+        let outcome =
+            match patcher.prepare(&worker_config, &self.repository_root, &request, &context) {
+                Ok(outcome) => outcome,
+                Err(error) => return tool_error(id, &error),
+            };
         let request_digest = outcome.request_digest;
         let response = McpPrepareChangeResponse::from_outcome(
             outcome,
@@ -1002,7 +1017,16 @@ impl ProductMcpServer {
         };
         let verifier = CodexVerifier::new(self.resolver.data_directory())
             .with_cancellation(Arc::clone(&self.cancellation));
-        let worker_config = settings.worker_config();
+        let worker_config = match self
+            .resolver
+            .store()
+            .resolve_session_worker_config(&self.session_id, settings.codex_executable.clone())
+        {
+            Ok(config) => config,
+            Err(error) => {
+                return tool_error(id, &format!("cannot resolve role-profile config: {error}"));
+            }
+        };
         let first = match verifier.verify(&worker_config, &self.repository_root, &request.change_id)
         {
             Ok(outcome) => outcome,
@@ -1026,9 +1050,10 @@ impl ProductMcpServer {
                         &request.change_id,
                     ) {
                         Ok(outcome) => outcome,
-                        Err(error) => match verifier.record_inconclusive(
+                        Err(error) => match verifier.record_inconclusive_with_provenance(
                             &request.change_id,
                             &format!("verification after the one-shot repair failed: {error}"),
+                            worker_config.role_profile_provenance.as_ref(),
                         ) {
                             Ok(outcome) => outcome,
                             Err(record_error) => return tool_error(id, &record_error),
@@ -1036,9 +1061,10 @@ impl ProductMcpServer {
                     };
                 }
                 Err(error) => {
-                    outcome = match verifier.record_inconclusive(
+                    outcome = match verifier.record_inconclusive_with_provenance(
                         &request.change_id,
                         &format!("one-shot repair failed: {error}"),
+                        worker_config.role_profile_provenance.as_ref(),
                     ) {
                         Ok(outcome) => outcome,
                         Err(record_error) => return tool_error(id, &record_error),
@@ -1096,6 +1122,10 @@ impl ProductMcpServer {
             worker_avoided: false,
             main_discovery_tainted: false,
         };
+        let audit = serde_json::to_string(&json!({
+            "role_profile_provenance": self.role_profile_provenance,
+        }))
+        .expect("bounded role-profile provenance serialization");
         let persisted = self
             .resolver
             .store()
@@ -1110,14 +1140,14 @@ impl ProductMcpServer {
                 self.resolver.store().append_need_step_event(
                     step.id,
                     NeedStepState::Resolving,
-                    "{}",
+                    &audit,
                 )
             })
             .and_then(|_| {
                 self.resolver.store().append_need_step_event(
                     step.id,
                     NeedStepState::Cancelled,
-                    "{}",
+                    &audit,
                 )
             });
         if let Err(error) = persisted {
@@ -1537,6 +1567,7 @@ fn record_observation(
     route: &str,
     relation: NeedStepRelation,
     outcome: &ResolveOutcome,
+    role_profile_provenance: &RoleProfileProvenance,
 ) -> Result<(), String> {
     let path = data_directory.join(OBSERVATION_FILE);
     let mut file = OpenOptions::new()
@@ -1547,7 +1578,7 @@ fn record_observation(
     serde_json::to_writer(
         &mut file,
         &json!({
-            "schema": "needle.mcp-observation/3",
+            "schema": "needle.mcp-observation/4",
             "transport": "mcp",
             "request_format": "json",
             "turn_id": turn_id,
@@ -1561,6 +1592,7 @@ fn record_observation(
             "calibration": outcome.calibration,
             "result_digest": outcome.result_digest,
             "semantic_artifact_ids": outcome.semantic_artifact_ids,
+            "role_profile_provenance": role_profile_provenance,
         }),
     )
     .map_err(|error| error.to_string())?;
@@ -1588,7 +1620,12 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use needle_core::{EvidenceFailurePolicy, MultiNeedPolicy};
+    use needle_core::{
+        CodexHost, CodexRole, CommandPolicy, EvidenceFailurePolicy, FallbackPolicy,
+        FilesystemPolicy, MultiNeedPolicy, NetworkPolicy, RepairPolicy, RoleProfileBudget,
+        RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId, ServiceTier, TestPolicy,
+        ToolPolicy,
+    };
     use needle_runtime::{RuntimeSettings, RuntimeStore};
     use std::process::Command;
 
@@ -1993,12 +2030,48 @@ mod tests {
                 multi_need_policy: MultiNeedPolicy::default(),
             })
             .unwrap();
+        let profile_id = RoleProfileId::new("explorer.default").unwrap();
+        let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+            profile_id: profile_id.clone(),
+            role: CodexRole::Explorer,
+            host: CodexHost::Codex,
+            model: "worker".to_owned(),
+            reasoning: needle_core::ReasoningLevel::Medium,
+            service_tier: ServiceTier::Default,
+            timeout_seconds: 5,
+            budget: RoleProfileBudget {
+                max_turns: 2,
+                max_output_tokens: 1200,
+                max_cost_microusd: 1000,
+            },
+            prompt_profile_digest: Digest::blake3(b"prompt"),
+            output_contract_digest: Digest::blake3(b"output"),
+            tool_policy: ToolPolicy::ReadOnly,
+            command_policy: CommandPolicy::ReadOnly,
+            filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+            network_policy: NetworkPolicy::Denied,
+            test_policy: TestPolicy::Disabled,
+            repair_policy: RepairPolicy::None,
+            fallback_policy: FallbackPolicy::Native,
+            concurrency: 1,
+            route_assignments: Vec::new(),
+        })
+        .unwrap();
+        store.create_role_profile(definition).unwrap();
+        store
+            .activate_role_profile(
+                &profile_id,
+                1,
+                store.role_profile_state(&profile_id).unwrap().state_digest,
+            )
+            .unwrap();
         let server = ProductMcpServer::new(ProductMcpConfig {
             data_directory,
             repository_root: repository,
             main_model: "main".to_owned(),
             cache_only: true,
             calibration_reuse: false,
+            role_profile_id: profile_id,
         })
         .unwrap();
         (root, server)

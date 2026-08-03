@@ -507,6 +507,7 @@ impl CodexWorker {
                     discarded_facts,
                     worker_session_id: session_id,
                     session_cleanup_success: cleanup_success,
+                    role_profile_provenance: config.role_profile_provenance.clone(),
                 })
             }
             Err((code, diagnostic)) => Err(Box::new(WorkerFailure {
@@ -522,6 +523,7 @@ impl CodexWorker {
                 discarded_facts,
                 worker_session_id: session_id,
                 session_cleanup_success: cleanup_success,
+                role_profile_provenance: config.role_profile_provenance.clone(),
             })),
         }
     }

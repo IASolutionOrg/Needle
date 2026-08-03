@@ -1,6 +1,6 @@
 use super::{
     AppError, HookConfig, absolute_run_path, canonical_child_path, option_value,
-    repository_status_clean, required_value, resolve_codex,
+    provision_experiment_role_profile, repository_status_clean, required_value, resolve_codex,
 };
 use needle_bench::{ArtifactCacheReplayReport, run_artifact_cache_replay};
 use needle_core::{
@@ -47,6 +47,7 @@ impl WorkerExecutor for ForbiddenWorker {
             discarded_facts: 0,
             worker_session_id: None,
             session_cleanup_success: Some(true),
+            role_profile_provenance: None,
         }))
     }
 }
@@ -102,6 +103,16 @@ pub(super) fn run(arguments: &[String]) -> Result<(), AppError> {
     let store = RuntimeStore::new(artifact_root.join("needle.sqlite3"));
     let profile =
         HookConfig::default().profile().map_err(|error| AppError::Experiment(error.to_string()))?;
+    let role_profile_id = provision_experiment_role_profile(
+        &store,
+        "artifact-cache-replay.explorer",
+        profile.definition_digest,
+        "recorded-r35-fixture",
+        "low",
+        "default",
+        1,
+        false,
+    )?;
     let instructions = profile.rendered_context_owned();
     let main_config = WorkerConfig {
         executable: simulator.display().to_string(),
@@ -110,6 +121,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), AppError> {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start(MainSessionConfig {
         codex: &main_config,
@@ -126,11 +138,12 @@ pub(super) fn run(arguments: &[String]) -> Result<(), AppError> {
     .map_err(AppError::Experiment)?;
     let session_id = session.thread_id().to_owned();
     store
-        .record_session_start(
+        .record_session_start_profiled(
             &session_id,
             profile.definition_digest,
             Some("simulated-main-r35-cache"),
             source_repository.to_str(),
+            &role_profile_id,
         )
         .map_err(|error| AppError::Experiment(error.to_string()))?;
 

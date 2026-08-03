@@ -34,6 +34,7 @@ pub(super) fn observe(context: DirectObservation<'_>) -> Result<MinimalLiveArm, 
         service_tier: Some(context.context.service_tier.to_owned()),
         timeout_seconds: context.context.timeout.as_secs(),
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let store = RuntimeStore::new(context.output.join("main-only.sqlite3"));
     store.initialize().map_err(|error| AppError::Experiment(error.to_string()))?;

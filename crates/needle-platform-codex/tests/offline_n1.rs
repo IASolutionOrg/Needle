@@ -1,4 +1,9 @@
-use needle_core::{Digest, EvidenceFailurePolicy, NeedRequest, TestPlan, WorkerConfig};
+use needle_core::{
+    CodexHost, CodexRole, CommandPolicy, Digest, EvidenceFailurePolicy, FallbackPolicy,
+    FilesystemPolicy, NeedRequest, NetworkPolicy, RepairPolicy, RoleProfileBudget,
+    RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId, ServiceTier, TestPlan,
+    TestPolicy, ToolPolicy, WorkerConfig,
+};
 use needle_platform_codex::{CodexWorker, HookConfig, StopInput, handle_stop_with_resolver};
 use needle_runtime::{ResolveRequest, RuntimeEngine, RuntimeSettings, RuntimeStore};
 use std::fs;
@@ -103,6 +108,7 @@ fn transport_preflight_reports_optional_runner_unavailable_without_a_model_turn(
                 service_tier: None,
                 timeout_seconds: 10,
                 evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+                role_profile_provenance: None,
             },
             &repository,
             "trace.state-flow",
@@ -165,6 +171,40 @@ struct Simulation {
     sandboxes_cleaned: bool,
 }
 
+fn active_role_profile(store: &RuntimeStore, prompt_profile_digest: Digest) -> RoleProfileId {
+    let profile_id = RoleProfileId::new("offline.explorer").unwrap();
+    let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: profile_id.clone(),
+        role: CodexRole::Explorer,
+        host: CodexHost::Codex,
+        model: "simulated-worker".to_owned(),
+        reasoning: needle_core::ReasoningLevel::Medium,
+        service_tier: ServiceTier::Default,
+        timeout_seconds: 10,
+        budget: RoleProfileBudget {
+            max_turns: 2,
+            max_output_tokens: 1200,
+            max_cost_microusd: 1000,
+        },
+        prompt_profile_digest,
+        output_contract_digest: Digest::blake3(needle_core::ARTIFACT_RESULT_SCHEMA_ID),
+        tool_policy: ToolPolicy::ReadOnly,
+        command_policy: CommandPolicy::ReadOnly,
+        filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+        network_policy: NetworkPolicy::Denied,
+        test_policy: TestPolicy::Disabled,
+        repair_policy: RepairPolicy::Once,
+        fallback_policy: FallbackPolicy::Native,
+        concurrency: 1,
+        route_assignments: Vec::new(),
+    })
+    .unwrap();
+    store.create_role_profile(definition).unwrap();
+    let state = store.role_profile_state(&profile_id).unwrap();
+    store.activate_role_profile(&profile_id, 1, state.state_digest).unwrap();
+    profile_id
+}
+
 impl Simulation {
     fn run(scenario: &str, repetition: u32) -> Self {
         let root = temporary_root(scenario, repetition);
@@ -188,12 +228,14 @@ impl Simulation {
         let session_id = format!("offline-session-{repetition}");
         let turn_id = format!("offline-turn-{repetition}");
         let profile = HookConfig::default().profile().unwrap();
+        let role_profile_id = active_role_profile(&store, profile.definition_digest);
         store
-            .record_session_start(
+            .record_session_start_profiled(
                 &session_id,
                 profile.definition_digest,
                 Some("simulated-main"),
                 repository.to_str(),
+                &role_profile_id,
             )
             .unwrap();
         store
@@ -242,11 +284,12 @@ impl Simulation {
             let cache_session = format!("offline-cache-session-{repetition}");
             let cache_turn = format!("offline-cache-turn-{repetition}");
             store
-                .record_session_start(
+                .record_session_start_profiled(
                     &cache_session,
                     profile.definition_digest,
                     Some("simulated-main"),
                     repository.to_str(),
+                    &role_profile_id,
                 )
                 .unwrap();
             store
@@ -275,11 +318,12 @@ impl Simulation {
             let hit_session = format!("offline-hit-session-{repetition}");
             let hit_turn = format!("offline-hit-turn-{repetition}");
             store
-                .record_session_start(
+                .record_session_start_profiled(
                     &hit_session,
                     profile.definition_digest,
                     Some("simulated-main"),
                     repository.to_str(),
+                    &role_profile_id,
                 )
                 .unwrap();
             store
@@ -308,6 +352,12 @@ impl Simulation {
             false
         };
         let worker = store.latest_worker_run().unwrap().expect("worker run");
+        let worker_provenance = worker
+            .role_profile_provenance
+            .as_ref()
+            .expect("profiled sessions must retain worker provenance");
+        assert_eq!(&worker_provenance.profile_id, &role_profile_id);
+        assert_eq!(worker_provenance.revision, 1);
         let worker_run_count = store.worker_run_count().unwrap();
         let command_evidence_count = store.command_evidence_count().unwrap();
         let no_pending_approvals = store.pending_approvals().unwrap().is_empty();

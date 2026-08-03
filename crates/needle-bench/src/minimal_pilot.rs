@@ -3,10 +3,12 @@ use crate::{
     preflight_frozen_corpus,
 };
 use needle_core::{
-    CacheResolution, CapabilityMode, Claim, CommandExecutionEvidence, Digest,
-    EvidenceFailurePolicy, EvidenceReference, NeedIr, NeedResult, PredicateKind, ReuseUnit,
-    SemanticArtifactResult, SemanticInterrupt, SemanticWorkerArtifact, TestPlan, Uncertainty,
-    WorkerConfig, WorkerFailure, WorkerOutcome, WorkerRequest,
+    CacheResolution, CapabilityMode, Claim, CodexHost, CodexRole, CommandExecutionEvidence,
+    CommandPolicy, Digest, EvidenceFailurePolicy, EvidenceReference, FallbackPolicy,
+    FilesystemPolicy, NeedIr, NeedResult, NetworkPolicy, PredicateKind, RepairPolicy, ReuseUnit,
+    RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId,
+    SemanticArtifactResult, SemanticInterrupt, SemanticWorkerArtifact, ServiceTier, TestPlan,
+    TestPolicy, ToolPolicy, Uncertainty, WorkerConfig, WorkerFailure, WorkerOutcome, WorkerRequest,
 };
 use needle_runtime::{
     ResolveOutcome, ResolveRequest, RouteCostObservation, RuntimeEngine, RuntimeError,
@@ -152,6 +154,7 @@ impl WorkerExecutor for DeterministicPilotWorker {
                         discarded_facts: 0,
                         worker_session_id: None,
                         session_cleanup_success: Some(true),
+                        role_profile_provenance: None,
                     })
                 })?;
         }
@@ -172,6 +175,7 @@ impl WorkerExecutor for DeterministicPilotWorker {
                 discarded_facts: 0,
                 worker_session_id: None,
                 session_cleanup_success: Some(true),
+                role_profile_provenance: None,
             })
         })?;
         retain_location_artifact(&mut semantic_result);
@@ -204,6 +208,7 @@ impl WorkerExecutor for DeterministicPilotWorker {
                     discarded_facts: 0,
                     worker_session_id: None,
                     session_cleanup_success: Some(true),
+                    role_profile_provenance: None,
                 })
             })?;
         let evidence_id = "implementation-location".to_owned();
@@ -260,6 +265,7 @@ impl WorkerExecutor for DeterministicPilotWorker {
             discarded_facts: 0,
             worker_session_id: None,
             session_cleanup_success: Some(true),
+            role_profile_provenance: config.role_profile_provenance.clone(),
         })
     }
 }
@@ -340,6 +346,7 @@ fn run_minimal_pilot_dry_run_with_hit_prompt(
         trusted_test_execution: false,
         multi_need_policy: needle_core::MultiNeedPolicy::default(),
     })?;
+    let role_profile_id = deterministic_role_profile(&store)?;
     store.mark_utility_gate_passed()?;
     let spawns = Arc::new(AtomicU32::new(0));
     let engine = RuntimeEngine::new(
@@ -362,6 +369,7 @@ fn run_minimal_pilot_dry_run_with_hit_prompt(
         &source_repository,
         Some(declared_test_plan.clone()),
         true,
+        &role_profile_id,
     )?;
     let miss_interrupt_digest = semantic_interrupt_digest(&miss_request)?;
     let miss = engine.resolve(&miss_request)?;
@@ -420,6 +428,7 @@ fn run_minimal_pilot_dry_run_with_hit_prompt(
         &source_repository,
         (!reworded_hit).then_some(declared_test_plan),
         !reworded_hit,
+        &role_profile_id,
     )?;
     let hit_interrupt_digest = semantic_interrupt_digest(&hit_request)?;
     let semantic_interrupt_digest_matches = miss_interrupt_digest == hit_interrupt_digest;
@@ -551,6 +560,43 @@ fn semantic_interrupt_digest(request: &ResolveRequest) -> Result<Digest, Minimal
     .digest())
 }
 
+fn deterministic_role_profile(
+    store: &RuntimeStore,
+) -> Result<RoleProfileId, MinimalPilotDryRunError> {
+    let profile_id = RoleProfileId::new("benchmark.explorer")
+        .map_err(|error| MinimalPilotDryRunError::Invalid(error.to_string()))?;
+    let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: profile_id.clone(),
+        role: CodexRole::Explorer,
+        host: CodexHost::Codex,
+        model: "deterministic-offline-fixture".to_owned(),
+        reasoning: needle_core::ReasoningLevel::Low,
+        service_tier: ServiceTier::Default,
+        timeout_seconds: 1,
+        budget: RoleProfileBudget {
+            max_turns: 2,
+            max_output_tokens: 1200,
+            max_cost_microusd: 1000,
+        },
+        prompt_profile_digest: Digest::blake3(b"minimal-pilot-v04-locate-profile"),
+        output_contract_digest: Digest::blake3(needle_core::ARTIFACT_RESULT_SCHEMA_ID),
+        tool_policy: ToolPolicy::ReadOnly,
+        command_policy: CommandPolicy::ReadOnly,
+        filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+        network_policy: NetworkPolicy::Denied,
+        test_policy: TestPolicy::Disabled,
+        repair_policy: RepairPolicy::None,
+        fallback_policy: FallbackPolicy::Native,
+        concurrency: 1,
+        route_assignments: Vec::new(),
+    })
+    .map_err(|error| MinimalPilotDryRunError::Invalid(error.to_string()))?;
+    store.create_role_profile(definition)?;
+    let state = store.role_profile_state(&profile_id)?;
+    store.activate_role_profile(&profile_id, 1, state.state_digest)?;
+    Ok(profile_id)
+}
+
 fn resolve_request(
     store: &RuntimeStore,
     task_id: &str,
@@ -559,15 +605,17 @@ fn resolve_request(
     source_repository: &Path,
     declared_test_plan: Option<TestPlan>,
     require_focused_tests: bool,
+    role_profile_id: &RoleProfileId,
 ) -> Result<ResolveRequest, MinimalPilotDryRunError> {
     let session = format!("minimal-pilot-{task_id}-{arm}");
     let turn = "turn";
     let profile_digest = Digest::blake3(b"minimal-pilot-v04-locate-profile");
-    store.record_session_start(
+    store.record_session_start_profiled(
         &session,
         profile_digest,
         Some("frontier"),
         source_repository.to_str(),
+        role_profile_id,
     )?;
     store.record_user_prompt(&session, Some(turn), prompt, source_repository.to_str())?;
     let focused_tests = if require_focused_tests {

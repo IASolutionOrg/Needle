@@ -2,8 +2,8 @@ use super::{
     AppError, HookConfig, absolute_run_path, canonical_child_path, clone_local_checkout,
     ensure_cache_pilot_hook_binary, ensure_codex_authenticated, ensure_dedicated_codex_home,
     ensure_product_pilot_hook_isolation, option_value, price_usage_observation_optional,
-    repository_status_clean, required_value, resolve_codex, validate_model_value,
-    validate_reasoning, validate_service_tier, validate_slug,
+    provision_experiment_role_profile, repository_status_clean, required_value, resolve_codex,
+    validate_model_value, validate_reasoning, validate_service_tier, validate_slug,
 };
 use needle_bench::{
     BenchmarkRoute, CachePilotResolveOutcome, ECONOMIC_EQUIVALENT_HIT_PROMPT, FinalArm,
@@ -12,8 +12,8 @@ use needle_bench::{
 };
 use needle_core::{
     CacheResolution, CapabilityMode, Digest, EvidenceFailurePolicy, ModelPolicy, MultiNeedPolicy,
-    NeedStep, PredicateKind, ReuseUnit, SelectedPlan, SemanticWorkerArtifact, WorkerConfig,
-    WorkerProfile,
+    NeedStep, PredicateKind, ReuseUnit, RoleProfileId, SelectedPlan, SemanticWorkerArtifact,
+    WorkerConfig, WorkerProfile,
 };
 use needle_platform_codex::{CodexWorker, TransportPreflightReport};
 use needle_runtime::{
@@ -735,6 +735,16 @@ fn execute(context: Execution<'_>) -> Result<(), AppError> {
 
     let profile =
         HookConfig::default().profile().map_err(|error| AppError::Experiment(error.to_string()))?;
+    let role_profile_id = provision_experiment_role_profile(
+        &store,
+        "minimal-live-pilot.explorer",
+        profile.definition_digest,
+        context.worker_model,
+        context.worker_reasoning,
+        context.service_tier,
+        context.timeout.as_secs().min(600),
+        false,
+    )?;
     let main_instructions = protocol::pilot_main_instructions(&profile.rendered_context_owned());
     let miss_quality_spec = quality_spec(context.protocol)?;
     let hit_quality_spec = coverage_hit_quality_spec(context.protocol)?;
@@ -822,6 +832,7 @@ fn execute(context: Execution<'_>) -> Result<(), AppError> {
         source_snapshot_digest: initial_snapshot.source_digest,
         repository_id: initial_snapshot.repository_id,
         prompt_profile_digest: profile.definition_digest,
+        role_profile_id: &role_profile_id,
         main_instructions: &main_instructions,
         prompt: publication_prompt,
         declared_test_plan: &declared_test_plan,
@@ -963,6 +974,7 @@ fn execute(context: Execution<'_>) -> Result<(), AppError> {
             source_snapshot_digest: initial_snapshot.source_digest,
             repository_id: initial_snapshot.repository_id,
             prompt_profile_digest: profile.definition_digest,
+            role_profile_id: &role_profile_id,
             main_instructions: &main_instructions,
             prompt: if context.economic {
                 if context.trace_reuse {
@@ -1081,6 +1093,7 @@ struct Observe<'a> {
     source_snapshot_digest: Digest,
     repository_id: Digest,
     prompt_profile_digest: Digest,
+    role_profile_id: &'a RoleProfileId,
     main_instructions: &'a str,
     prompt: &'a str,
     declared_test_plan: &'a needle_core::TestPlan,
@@ -1560,6 +1573,7 @@ fn run_declared_test_transport_preflight(
         service_tier: Some(service_tier.to_owned()),
         timeout_seconds: 30,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     CodexWorker::with_codex_home(data_root, codex_home)
         .preflight_transport_for_test_plan(

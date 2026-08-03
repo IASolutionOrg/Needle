@@ -89,10 +89,17 @@ projects to the existing `WorkerProfile` representation with `None`, while
 distinct from the role-profile definition/revision digest. Projection is
 explicit and does not read or modify `ModelPolicy`.
 
-The domain and SQLite migration are currently an offline persistence boundary:
-there is no HTTP/editor UI, session or worker binding, lifecycle executor, or
-automatic activation yet. Role profiles never carry credentials, host paths,
-or network access.
+Role-profile definitions and revisions remain local SQLite state. New
+production sessions bind an explicitly selected active revision; the binding
+stores only profile ID, revision, and definition digest. Historical sessions
+reload that exact revision even after a later activation. Legacy rows remain
+unknown and cannot be reused for profile-dependent cache or worker execution.
+Role profiles never carry credentials, host paths, or network access.
+
+The product hook selects a profile with `NEEDLE_ROLE_PROFILE_ID`. If that
+variable is missing or invalid, the hook remains fail-open but records no
+session row, so the runtime cannot silently attribute the session to a current
+active revision. MCP uses the required `--role-profile <id>` selector.
 
 ## Export and import
 

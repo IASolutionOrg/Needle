@@ -1,8 +1,9 @@
 use super::{
     AppError, HookConfig, absolute_run_path, canonical_child_path, ensure_cache_pilot_hook_binary,
     ensure_codex_authenticated, ensure_dedicated_codex_home, ensure_product_pilot_hook_isolation,
-    option_value, price_usage_observation_optional, repository_status_clean, required_value,
-    resolve_codex, validate_model_value, validate_reasoning, validate_service_tier,
+    option_value, price_usage_observation_optional, provision_experiment_role_profile,
+    repository_status_clean, required_value, resolve_codex, validate_model_value,
+    validate_reasoning, validate_service_tier,
 };
 use crate::minimal_live_pilot::protocol::{
     DEFAULT_MANIFEST, DEFAULT_PRICING, Protocol, load_pricing, load_protocol, quality_spec,
@@ -199,6 +200,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), AppError> {
         service_tier: Some(service_tier.clone()),
         timeout_seconds,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let temporary = TemporaryRunRoot::create(&artifact_root)?;
     let request = capture_worker_request(temporary.path(), &source_repository, &protocol, &config)?;
@@ -519,6 +521,7 @@ impl WorkerExecutor for CaptureWorker {
             discarded_facts: 0,
             worker_session_id: None,
             session_cleanup_success: None,
+            role_profile_provenance: _config.role_profile_provenance.clone(),
         }))
     }
 }
@@ -543,14 +546,25 @@ fn capture_worker_request(
         .map_err(|error| AppError::Experiment(error.to_string()))?;
     let profile =
         HookConfig::default().profile().map_err(|error| AppError::Experiment(error.to_string()))?;
+    let role_profile_id = provision_experiment_role_profile(
+        &store,
+        "worker-diagnostic.explorer",
+        profile.definition_digest,
+        &config.model,
+        &config.reasoning,
+        config.service_tier.as_deref().unwrap_or("default"),
+        config.timeout_seconds,
+        false,
+    )?;
     let session = "worker-diagnostic-capture";
     let turn = "worker-diagnostic-turn";
     store
-        .record_session_start(
+        .record_session_start_profiled(
             session,
             profile.definition_digest,
             Some("diagnostic-main"),
             repository.to_str(),
+            &role_profile_id,
         )
         .map_err(|error| AppError::Experiment(error.to_string()))?;
     store
@@ -751,6 +765,7 @@ mod tests {
             discarded_facts: 0,
             worker_session_id: Some("thread".to_owned()),
             session_cleanup_success: Some(true),
+            role_profile_provenance: None,
         };
         let metrics = attempt_metrics(None, Some(&failure)).unwrap();
         assert_eq!(metrics.logical_worker_spawns, 1);

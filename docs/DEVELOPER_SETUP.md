@@ -101,11 +101,14 @@ cargo run --locked -p needle-app -- mcp serve \
   --data-dir <profile-data-directory> \
   --repository <repository-root> \
   --main-model <main-model> \
+  --role-profile <active-role-profile-id> \
   --cache-only
 ```
 
-`--cache-only` disables worker fallback and change tools. Omit it only in a
+The `--cache-only` option disables worker fallback and change tools. Omit it only in a
 deliberately configured development profile. See [MCP transport](MCP_TRANSPORT.md).
+The role-profile selector is mandatory and freezes the selected active revision
+for the MCP session.
 
 ## Validate plugins
 

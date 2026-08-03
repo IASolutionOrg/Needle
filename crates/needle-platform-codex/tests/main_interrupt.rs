@@ -1,7 +1,10 @@
 use needle_core::{
-    ApprovalDecision, ApprovalDecisionSource, CommandClassification, Digest, EvidenceFailurePolicy,
-    NeedCoordination, NeedDelivery, NeedStepRelation, PredicateKind, TestPlan, WorkerConfig,
-    built_in_route_contracts, classify_need_step, compile_need,
+    ApprovalDecision, ApprovalDecisionSource, CodexHost, CodexRole, CommandClassification,
+    CommandPolicy, Digest, EvidenceFailurePolicy, FallbackPolicy, FilesystemPolicy,
+    NeedCoordination, NeedDelivery, NeedStepRelation, NetworkPolicy, PredicateKind, RepairPolicy,
+    RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId,
+    ServiceTier, TestPlan, TestPolicy, ToolPolicy, WorkerConfig, built_in_route_contracts,
+    classify_need_step, compile_need,
 };
 use needle_platform_codex::{
     CodexMainSession, CodexWorker, HookConfig, MainNeedRelation, MainSessionConfig, MainTurnResult,
@@ -16,6 +19,40 @@ use std::time::{Duration, Instant};
 
 const SIMULATOR: &str = env!("CARGO_BIN_EXE_needle-sim-codex");
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn active_role_profile(store: &RuntimeStore, prompt_profile_digest: Digest) -> RoleProfileId {
+    let profile_id = RoleProfileId::new("main-interrupt.explorer").unwrap();
+    let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+        profile_id: profile_id.clone(),
+        role: CodexRole::Explorer,
+        host: CodexHost::Codex,
+        model: "simulated-worker".to_owned(),
+        reasoning: needle_core::ReasoningLevel::Medium,
+        service_tier: ServiceTier::Default,
+        timeout_seconds: 10,
+        budget: RoleProfileBudget {
+            max_turns: 2,
+            max_output_tokens: 1200,
+            max_cost_microusd: 1000,
+        },
+        prompt_profile_digest,
+        output_contract_digest: Digest::blake3(needle_core::ARTIFACT_RESULT_SCHEMA_ID),
+        tool_policy: ToolPolicy::ReadOnly,
+        command_policy: CommandPolicy::ReadOnly,
+        filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+        network_policy: NetworkPolicy::Denied,
+        test_policy: TestPolicy::Disabled,
+        repair_policy: RepairPolicy::None,
+        fallback_policy: FallbackPolicy::Native,
+        concurrency: 1,
+        route_assignments: Vec::new(),
+    })
+    .unwrap();
+    store.create_role_profile(definition).unwrap();
+    let state = store.role_profile_state(&profile_id).unwrap();
+    store.activate_role_profile(&profile_id, 1, state.state_digest).unwrap();
+    profile_id
+}
 
 #[test]
 fn direct_main_completes_without_semantic_interrupt() {
@@ -38,6 +75,7 @@ fn direct_main_completes_without_semantic_interrupt() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start_pilot(MainSessionConfig {
         codex: &config,
@@ -88,6 +126,7 @@ fn pilot_main_auto_approves_one_bounded_repository_read() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start_pilot(MainSessionConfig {
         codex: &config,
@@ -137,6 +176,7 @@ fn pilot_main_fails_fast_on_r84_style_script_and_preserves_usage() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start_pilot(MainSessionConfig {
         codex: &config,
@@ -191,6 +231,7 @@ fn semantic_message_interrupts_before_tools_and_continues_same_thread() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let source_digest = Digest::blake3(b"main-interrupt-source");
     let mut session = CodexMainSession::start(MainSessionConfig {
@@ -255,6 +296,7 @@ fn nested_continuation_need_is_preserved_and_classified_before_cleanup() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start(MainSessionConfig {
         codex: &config,
@@ -321,6 +363,7 @@ fn sequential_turns_accept_two_needs_then_return_a_final_response() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start(MainSessionConfig {
         codex: &config,
@@ -548,6 +591,7 @@ fn r35_cache_main_simulation_returns_the_frontier_answer_without_tools() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start(MainSessionConfig {
         codex: &config,
@@ -615,6 +659,7 @@ fn malformed_subject_is_interrupted_and_preserved_before_validation() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let mut session = CodexMainSession::start(MainSessionConfig {
         codex: &config,
@@ -681,6 +726,7 @@ fn supervised_main_resolves_with_worker_then_continues_without_discovery() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let source_digest = Digest::blake3(b"main-resolve-source");
     let repository_id = Digest::blake3(b"main-resolve-repository");
@@ -698,12 +744,14 @@ fn supervised_main_resolves_with_worker_then_continues_without_discovery() {
     })
     .unwrap();
     let session_id = session.thread_id().to_owned();
+    let role_profile_id = active_role_profile(&store, profile.definition_digest);
     store
-        .record_session_start(
+        .record_session_start_profiled(
             &session_id,
             profile.definition_digest,
             Some("simulated-main"),
             repository.to_str(),
+            &role_profile_id,
         )
         .unwrap();
 
@@ -774,6 +822,7 @@ fn main_session(scenario: &str) -> (PathBuf, PathBuf, CodexMainSession) {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let session = CodexMainSession::start(MainSessionConfig {
         codex: &config,

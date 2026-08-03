@@ -12,9 +12,9 @@ use needle_core::{
     ARTIFACT_RESULT_SCHEMA_ID, Artifact, ArtifactContract, ArtifactId, ArtifactKind,
     ArtifactRequest, BehaviorStep, BehaviorTrace, CacheLookup, CacheResolution, CacheScope,
     CodeLocation, Dependency, DependencyManifest, Digest, EvidenceBrief, FrontierItem,
-    FrontierView, ModelPolicy, Need, NeedCacheEntry, NeedCacheIdentity, NeedFragment, NeedIr,
-    NeedRequest, Obligation, PredicateKind, RouteContract, RoutePlan, SemanticWorkerArtifact,
-    TestPlan, ValidationRecord, WorkerArtifact, WorkerArtifactResult, WorkerConfig, WorkerFailure,
+    FrontierView, Need, NeedCacheEntry, NeedCacheIdentity, NeedFragment, NeedIr, NeedRequest,
+    Obligation, PredicateKind, RouteContract, RoutePlan, SemanticWorkerArtifact, TestPlan,
+    ValidationRecord, WorkerArtifact, WorkerArtifactResult, WorkerConfig, WorkerFailure,
     WorkerOutcome, WorkerRequest, built_in_route_contracts, built_in_route_plans, compile_need,
     need_fragment,
 };
@@ -53,6 +53,8 @@ pub enum RuntimeError {
     Worker(Box<WorkerFailure>),
     #[error("session context is unavailable")]
     MissingSession,
+    #[error("session role-profile provenance is unknown")]
+    RoleProfileProvenanceUnknown,
     #[error("no route matches this request")]
     NoRoute,
     #[error("worker result changed the source snapshot")]
@@ -177,6 +179,9 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
     ) -> Result<ResolveOutcome, RuntimeError> {
         let session =
             self.store.session(&request.session_id)?.ok_or(RuntimeError::MissingSession)?;
+        if session.role_profile_provenance.is_none() {
+            return Err(RuntimeError::RoleProfileProvenanceUnknown);
+        }
         let root_task = session.root_task.ok_or(RuntimeError::MissingSession)?;
         if session.turn_id.as_deref().is_some_and(|turn| turn != request.turn_id) {
             return Err(RuntimeError::MissingSession);
@@ -261,7 +266,10 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         }
         let preset = self.store.preset(&route.preset_id)?.ok_or(RuntimeError::NoRoute)?;
         let settings = self.store.settings()?;
-        let worker_config = settings.worker_config();
+        let worker_config = self.store.resolve_session_worker_config(
+            &request.session_id,
+            settings.codex_executable.clone(),
+        )?;
         let trusted_test_execution = settings.trusted_test_execution;
         let artifact_request =
             evidence_brief_request(&request.need, snapshot.repository_id, snapshot.source_digest);
@@ -275,6 +283,7 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
             normalized_request_digest: request.need.digest(),
             worker_configuration_digest: worker_config.digest(),
             output_schema_digest: Digest::blake3(ARTIFACT_RESULT_SCHEMA_ID),
+            role_profile_provenance: worker_config.role_profile_provenance.clone(),
         };
         let mut worker_request = WorkerRequest {
             root_task,
@@ -580,15 +589,13 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
                 return Err(RuntimeError::LeaseExpired);
             }
         }
-        let outcome =
-            match self.generate_with_model_policy(&worker_config, &worker_request, identity_digest)
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    self.store.release_lease(identity_digest, &owner)?;
-                    return Err(error);
-                }
-            };
+        let outcome = match self.generate(&worker_config, &worker_request, identity_digest) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.store.release_lease(identity_digest, &owner)?;
+                return Err(error);
+            }
+        };
         let entry = NeedCacheEntry {
             identity,
             result: outcome.result.clone(),
@@ -685,79 +692,6 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         Ok(outcome)
     }
 
-    fn generate_with_model_policy(
-        &self,
-        base: &WorkerConfig,
-        request: &WorkerRequest,
-        identity_digest: Digest,
-    ) -> Result<WorkerOutcome, RuntimeError> {
-        let policy = self.store.model_policy()?;
-        let (profiles, repair_once, native_fallback) = match policy {
-            ModelPolicy::FixedOrder { profiles, repair_once, native_fallback } => {
-                (profiles, repair_once, native_fallback)
-            }
-            ModelPolicy::CheapestValidatedFirst { promoted_profiles, native_fallback } => {
-                let promoted = self.store.promoted_profile_digests(request.need_key.as_str())?;
-                if promoted_profiles
-                    .iter()
-                    .any(|profile| !promoted.contains(&profile.definition_digest))
-                {
-                    return Err(RuntimeError::ModelPolicy(
-                        "CheapestValidatedFirst includes an unpromoted route/profile pair"
-                            .to_owned(),
-                    ));
-                }
-                (promoted_profiles, false, native_fallback)
-            }
-        };
-        if profiles.is_empty() {
-            return Err(RuntimeError::ModelPolicy("the fixed model order is empty".to_owned()));
-        }
-        let mut last_error = None;
-        for profile in profiles {
-            if profile.platform != "codex" {
-                return Err(RuntimeError::ModelPolicy(
-                    "only Codex worker profiles are supported".to_owned(),
-                ));
-            }
-            let mut config = base.clone();
-            config.model = profile.model;
-            config.reasoning = profile.reasoning;
-            config.service_tier = profile.service_tier;
-            if repair_once {
-                config.evidence_failure_policy = needle_core::EvidenceFailurePolicy::RepairOnce;
-            }
-            let attempt_identity = Digest::blake3(format!(
-                "needle-ladder-attempt\n{identity_digest}\n{}\n",
-                profile.definition_digest
-            ));
-            if self.store.negative_attempt(attempt_identity)?.is_some() {
-                continue;
-            }
-            match self.generate(&config, request, attempt_identity) {
-                Ok(outcome) => return Ok(outcome),
-                Err(error) => {
-                    if let Some((code, diagnostic)) = cacheable_negative_failure(&error) {
-                        self.store.record_negative_attempt(
-                            attempt_identity,
-                            code,
-                            diagnostic,
-                            now_ms().saturating_add(300_000),
-                        )?;
-                    }
-                    last_error = Some(error);
-                }
-            }
-        }
-        if native_fallback {
-            Err(RuntimeError::NativeFallback)
-        } else {
-            Err(last_error.unwrap_or_else(|| {
-                RuntimeError::ModelPolicy("model ladder produced no attempt".to_owned())
-            }))
-        }
-    }
-
     fn wait_for_result(
         &self,
         context: WaitForResult<'_>,
@@ -832,15 +766,6 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         }
         Ok(None)
     }
-}
-
-fn cacheable_negative_failure(error: &RuntimeError) -> Option<(&str, &str)> {
-    let RuntimeError::Worker(failure) = error else {
-        return None;
-    };
-    ["test_evidence_invalid", "no_valid_evidence", "evidence_binding_failed", "semantic_validation"]
-        .contains(&failure.code.as_str())
-        .then_some((failure.code.as_str(), failure.diagnostic.as_str()))
 }
 
 fn evidence_brief_request(
@@ -2335,10 +2260,12 @@ mod tests {
     use super::*;
     use crate::{RuntimeSettings, validate_semantic_artifact};
     use needle_core::{
-        Claim, ClaimKind, ClaimPayload, CommandExecutionEvidence, EvidenceFailurePolicy,
-        EvidenceReference, FlowStepRole, LocationRole, NeedResult, SemanticArtifactResult,
-        SemanticFlowStep, SemanticLocation, Uncertainty, WorkerFailure, WorkerOutcome,
-        WorkerProfile,
+        Claim, ClaimKind, ClaimPayload, CodexHost, CodexRole, CommandExecutionEvidence,
+        CommandPolicy, EvidenceFailurePolicy, EvidenceReference, FallbackPolicy, FilesystemPolicy,
+        FlowStepRole, LocationRole, ModelPolicy, NeedResult, NetworkPolicy, RepairPolicy,
+        RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId,
+        SemanticArtifactResult, SemanticFlowStep, SemanticLocation, ServiceTier, TestPolicy,
+        ToolPolicy, Uncertainty, WorkerFailure, WorkerOutcome, WorkerProfile,
     };
     use std::fs;
     use std::process::Command;
@@ -2481,6 +2408,7 @@ mod tests {
                     discarded_facts: 0,
                     worker_session_id: None,
                     session_cleanup_success: None,
+                    role_profile_provenance: None,
                 }));
             }
             FakeWorker { spawns: Arc::new(AtomicUsize::new(0)), delay: Duration::ZERO }
@@ -2537,6 +2465,7 @@ mod tests {
                 discarded_facts: 0,
                 worker_session_id: None,
                 session_cleanup_success: None,
+                role_profile_provenance: config.role_profile_provenance.clone(),
             })
         }
     }
@@ -2749,6 +2678,7 @@ mod tests {
         root: PathBuf,
         store: RuntimeStore,
         prompt_digest: Digest,
+        profile_id: RoleProfileId,
     }
 
     impl TestContext {
@@ -2790,13 +2720,54 @@ mod tests {
                     multi_need_policy: needle_core::MultiNeedPolicy::default(),
                 })
                 .unwrap();
+            let profile_id = RoleProfileId::new("test.profile").unwrap();
+            let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+                profile_id: profile_id.clone(),
+                role: CodexRole::Explorer,
+                host: CodexHost::Codex,
+                model: "worker".to_owned(),
+                reasoning: needle_core::ReasoningLevel::Medium,
+                service_tier: ServiceTier::Default,
+                timeout_seconds: 5,
+                budget: RoleProfileBudget {
+                    max_turns: 2,
+                    max_output_tokens: 1200,
+                    max_cost_microusd: 1000,
+                },
+                prompt_profile_digest: Digest::blake3(b"prompt"),
+                output_contract_digest: Digest::blake3(b"output"),
+                tool_policy: ToolPolicy::ReadOnly,
+                command_policy: CommandPolicy::ReadOnly,
+                filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
+                network_policy: NetworkPolicy::Denied,
+                test_policy: TestPolicy::Disabled,
+                repair_policy: RepairPolicy::None,
+                fallback_policy: FallbackPolicy::Native,
+                concurrency: 1,
+                route_assignments: Vec::new(),
+            })
+            .unwrap();
+            store.create_role_profile(definition).unwrap();
+            store
+                .activate_role_profile(
+                    &profile_id,
+                    1,
+                    store.role_profile_state(&profile_id).unwrap().state_digest,
+                )
+                .unwrap();
             store.mark_utility_gate_passed().unwrap();
-            Self { root, store, prompt_digest: Digest::blake3("profile") }
+            Self { root, store, prompt_digest: Digest::blake3("profile"), profile_id }
         }
 
         fn request(&self, session: &str) -> ResolveRequest {
             self.store
-                .record_session_start(session, self.prompt_digest, Some("main"), self.root.to_str())
+                .record_session_start_profiled(
+                    session,
+                    self.prompt_digest,
+                    Some("main"),
+                    self.root.to_str(),
+                    &self.profile_id,
+                )
                 .unwrap();
             self.store
                 .record_user_prompt(session, Some("turn"), "Trace the answer.", self.root.to_str())
@@ -2971,11 +2942,12 @@ mod tests {
         let semantic_request = |session: &str, body: &str| {
             context
                 .store
-                .record_session_start(
+                .record_session_start_profiled(
                     session,
                     context.prompt_digest,
                     Some("main"),
                     context.root.to_str(),
+                    &context.profile_id,
                 )
                 .unwrap();
             context
@@ -3295,11 +3267,12 @@ mod tests {
             .unwrap();
         context
             .store
-            .record_session_start(
+            .record_session_start_profiled(
                 "claim-authority-hit",
                 context.prompt_digest,
                 Some("main"),
                 context.root.to_str(),
+                &context.profile_id,
             )
             .unwrap();
         context
@@ -3357,11 +3330,12 @@ mod tests {
         .compatibility_request();
         context
             .store
-            .record_session_start(
+            .record_session_start_profiled(
                 "claim-authority-partial",
                 context.prompt_digest,
                 Some("main"),
                 context.root.to_str(),
+                &context.profile_id,
             )
             .unwrap();
         context
@@ -3478,11 +3452,12 @@ mod tests {
         let semantic_request = |session: &str, marker: &str| {
             context
                 .store
-                .record_session_start(
+                .record_session_start_profiled(
                     session,
                     context.prompt_digest,
                     Some("main"),
                     context.root.to_str(),
+                    &context.profile_id,
                 )
                 .unwrap();
             context
@@ -3636,11 +3611,12 @@ mod tests {
         let semantic_request = |session: &str, marker: &str| {
             context
                 .store
-                .record_session_start(
+                .record_session_start_profiled(
                     session,
                     context.prompt_digest,
                     Some("main"),
                     context.root.to_str(),
+                    &context.profile_id,
                 )
                 .unwrap();
             context
@@ -3886,7 +3862,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_model_order_escalates_after_one_worker_repairs_and_fails() {
+    fn active_session_ignores_mutable_model_policy_ladder() {
         let context = TestContext::create();
         context
             .store
@@ -3904,7 +3880,7 @@ mod tests {
             RuntimeEngine::new(context.store.clone(), LadderWorker { calls: calls.clone() });
         let outcome = engine.resolve(&context.request("ladder")).unwrap();
         assert_eq!(outcome.status, "generated");
-        assert_eq!(*calls.lock().unwrap(), vec!["cheap", "strong"]);
+        assert_eq!(*calls.lock().unwrap(), vec!["worker"]);
         let _ = fs::remove_dir_all(context.root.parent().unwrap());
     }
 
@@ -4123,6 +4099,7 @@ mod tests {
             discarded_facts: 0,
             worker_session_id: Some("worker-r43-offline".to_owned()),
             session_cleanup_success: Some(true),
+            role_profile_provenance: None,
         };
         let reused = BTreeMap::new();
         let materialized = materialize_worker_artifact(

@@ -121,12 +121,13 @@ impl CodexPatchWorker {
         let change_id = unique_change_id(request_digest);
         let store = RuntimeStore::new(self.data_directory.join("needle.sqlite3"));
         if let Err(error) = store.initialize().and_then(|()| {
-            store.record_change_request(
+            store.record_change_request_with_provenance(
                 &change_id,
                 sandbox.snapshot().repository_id,
                 sandbox.snapshot().source_digest,
                 request_digest,
                 request,
+                config.role_profile_provenance.as_ref(),
             )
         }) {
             return cleanup_sandbox_after_error(sandbox, error.to_string());
@@ -342,20 +343,21 @@ impl CodexPatchWorker {
             ),
             discrepancies,
         };
-        if let Err(error) = store.record_prepared_change(
+        if let Err(error) = store.record_prepared_change_with_provenance(
             sandbox.snapshot().repository_id,
             request_digest,
             request,
             &patch,
             &turn.response,
             &blobs,
+            config.role_profile_provenance.as_ref(),
         ) {
             return cleanup_sandbox_after_error(
                 sandbox,
                 format!("cannot persist patch before cleanup: {error}"),
             );
         }
-        if let Err(error) = store.record_patch_attempt(
+        if let Err(error) = store.record_patch_attempt_with_provenance(
             &change_id,
             patch_id,
             &json!({
@@ -373,6 +375,7 @@ impl CodexPatchWorker {
             }),
             None,
             current_unix_ms(),
+            config.role_profile_provenance.as_ref(),
         ) {
             let reason = format!("cannot persist patch attempt accounting: {error}");
             return cleanup_sandbox_after_error(sandbox, reason);

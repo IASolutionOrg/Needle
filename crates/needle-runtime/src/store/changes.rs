@@ -4,7 +4,71 @@ use needle_core::{
     PatchArtifact, PatchId, VerificationArtifact, VerificationStatus,
 };
 
-type PreparedChangeRow = (String, String, String, String, String, String, String, bool, u64);
+type PreparedChangeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    u64,
+    Option<String>,
+    Option<u64>,
+    Option<String>,
+);
+
+fn with_role_profile_provenance(
+    value: &serde_json::Value,
+    provenance: Option<&RoleProfileProvenance>,
+) -> serde_json::Value {
+    let Some(provenance) = provenance else {
+        return value.clone();
+    };
+    let bounded = serde_json::json!({
+        "profile_id": provenance.profile_id,
+        "revision": provenance.revision,
+        "definition_digest": provenance.definition_digest,
+    });
+    if let Some(object) = value.as_object() {
+        let mut object = object.clone();
+        object.insert("role_profile_provenance".to_owned(), bounded);
+        serde_json::Value::Object(object)
+    } else {
+        serde_json::json!({
+            "attempt": value,
+            "role_profile_provenance": bounded,
+        })
+    }
+}
+
+fn change_role_profile_provenance(
+    connection: &Connection,
+    change_id: &ChangeId,
+) -> Result<Option<RoleProfileProvenance>, StoreError> {
+    let columns: (Option<String>, Option<u64>, Option<String>) = connection.query_row(
+        "SELECT role_profile_id, role_profile_revision, role_profile_definition_digest
+         FROM change_requests WHERE change_id=?1",
+        [change_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    parse_role_profile_provenance(columns)
+}
+
+fn require_change_role_profile_provenance(
+    connection: &Connection,
+    change_id: &ChangeId,
+    expected: Option<&RoleProfileProvenance>,
+) -> Result<Option<RoleProfileProvenance>, StoreError> {
+    let stored = change_role_profile_provenance(connection, change_id)?;
+    if stored.as_ref() != expected {
+        return Err(StoreError::ChangeConflict(format!(
+            "{change_id}: role-profile provenance changed"
+        )));
+    }
+    Ok(stored)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatchFileBlob {
@@ -25,6 +89,7 @@ pub struct PreparedChangeRecord {
     pub declared_output: serde_json::Value,
     pub repair_attempted: bool,
     pub created_unix_ms: u64,
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,6 +101,7 @@ pub struct ChangeAttemptRecord {
     pub usage: serde_json::Value,
     pub cost_microusd: Option<u64>,
     pub created_unix_ms: u64,
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 impl RuntimeStore {
@@ -47,24 +113,82 @@ impl RuntimeStore {
         request_digest: Digest,
         request: &ChangeRequest,
     ) -> Result<(), StoreError> {
+        self.record_change_request_with_provenance(
+            change_id,
+            repository_id,
+            source_snapshot,
+            request_digest,
+            request,
+            None,
+        )
+    }
+
+    pub fn record_change_request_with_provenance(
+        &self,
+        change_id: &ChangeId,
+        repository_id: Digest,
+        source_snapshot: Digest,
+        request_digest: Digest,
+        request: &ChangeRequest,
+        role_profile_provenance: Option<&RoleProfileProvenance>,
+    ) -> Result<(), StoreError> {
+        if let Some(provenance) = role_profile_provenance
+            && !self.role_profile_provenance_is_historical(provenance)?
+        {
+            return Err(StoreError::ChangeConflict(format!(
+                "{change_id}: unknown role-profile revision"
+            )));
+        }
         let request_json = serde_json::to_string(request)?;
         let now = now_ms();
         let mut connection = self.connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, String, String)> = transaction
+        let existing: Option<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+            Option<String>,
+        )> = transaction
             .query_row(
-                "SELECT request_digest, repository_id, source_snapshot_digest, request_json
+                "SELECT request_digest, repository_id, source_snapshot_digest, request_json,
+                        role_profile_id, role_profile_revision,
+                        role_profile_definition_digest
                  FROM change_requests WHERE change_id=?1",
                 [change_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((stored_request, stored_repository, stored_snapshot, stored_json)) = existing {
+        if let Some((
+            stored_request,
+            stored_repository,
+            stored_snapshot,
+            stored_json,
+            profile_id,
+            profile_revision,
+            profile_digest,
+        )) = existing
+        {
+            let stored_provenance =
+                parse_role_profile_provenance((profile_id, profile_revision, profile_digest))?;
             if stored_request == request_digest.to_string()
                 && stored_repository == repository_id.to_string()
                 && stored_snapshot == source_snapshot.to_string()
                 && stored_json == request_json
+                && stored_provenance.as_ref() == role_profile_provenance
             {
                 transaction.commit()?;
                 return Ok(());
@@ -75,21 +199,28 @@ impl RuntimeStore {
             "INSERT INTO change_requests(
                 change_id, request_digest, repository_id, source_snapshot_digest,
                 state, request_json, latest_patch_revision, repair_attempted,
-                created_unix_ms, updated_unix_ms
-             ) VALUES(?1, ?2, ?3, ?4, 'requested', ?5, 0, 0, ?6, ?6)",
+                created_unix_ms, updated_unix_ms, role_profile_id,
+                role_profile_revision, role_profile_definition_digest
+             ) VALUES(?1, ?2, ?3, ?4, 'requested', ?5, 0, 0, ?6, ?6, ?7, ?8, ?9)",
             params![
                 change_id.to_string(),
                 request_digest.to_string(),
                 repository_id.to_string(),
                 source_snapshot.to_string(),
                 request_json,
-                now
+                now,
+                role_profile_provenance.map(|value| value.profile_id.as_str()),
+                role_profile_provenance.map(|value| value.revision),
+                role_profile_provenance.map(|value| value.definition_digest.to_string()),
             ],
         )?;
-        let event_json = serde_json::to_string(&serde_json::json!({
-            "request_digest": request_digest,
-            "state": "requested"
-        }))?;
+        let event_json = serde_json::to_string(&with_role_profile_provenance(
+            &serde_json::json!({
+                "request_digest": request_digest,
+                "state": "requested"
+            }),
+            role_profile_provenance,
+        ))?;
         transaction.execute(
             "INSERT INTO change_events(
                 change_id, event_type, payload_digest, payload_json, created_unix_ms
@@ -115,6 +246,36 @@ impl RuntimeStore {
         declared_output: &serde_json::Value,
         file_blobs: &[PatchFileBlob],
     ) -> Result<(), StoreError> {
+        self.record_prepared_change_with_provenance(
+            repository_id,
+            request_digest,
+            request,
+            patch,
+            declared_output,
+            file_blobs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_prepared_change_with_provenance(
+        &self,
+        repository_id: Digest,
+        request_digest: Digest,
+        request: &ChangeRequest,
+        patch: &PatchArtifact,
+        declared_output: &serde_json::Value,
+        file_blobs: &[PatchFileBlob],
+        role_profile_provenance: Option<&RoleProfileProvenance>,
+    ) -> Result<(), StoreError> {
+        if let Some(provenance) = role_profile_provenance
+            && !self.role_profile_provenance_is_historical(provenance)?
+        {
+            return Err(StoreError::ChangeConflict(format!(
+                "{}: unknown role-profile revision",
+                patch.change_id
+            )));
+        }
         if patch.id != PatchArtifact::compute_id(patch.source_snapshot, &patch.files) {
             return Err(StoreError::PatchArtifact(
                 "patch id does not match the filesystem manifest".to_owned(),
@@ -147,11 +308,14 @@ impl RuntimeStore {
         let manifest_json = serde_json::to_string(&patch.files)?;
         let declared_output_json = serde_json::to_string(declared_output)?;
         let discrepancies_json = serde_json::to_string(&patch.discrepancies)?;
-        let event_payload = serde_json::json!({
-            "patch_id": patch.id,
-            "revision": patch.revision,
-            "state": "prepared"
-        });
+        let event_payload = with_role_profile_provenance(
+            &serde_json::json!({
+                "patch_id": patch.id,
+                "revision": patch.revision,
+                "state": "prepared"
+            }),
+            role_profile_provenance,
+        );
         let event_json = serde_json::to_string(&event_payload)?;
         let event_digest = Digest::blake3(event_json.as_bytes());
         let now = now_ms();
@@ -166,6 +330,13 @@ impl RuntimeStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
+        if existing.is_some() {
+            require_change_role_profile_provenance(
+                &transaction,
+                &patch.change_id,
+                role_profile_provenance,
+            )?;
+        }
         match &existing {
             None if patch.revision != 1 => {
                 return Err(StoreError::PatchArtifact(
@@ -190,8 +361,9 @@ impl RuntimeStore {
         transaction.execute(
             "INSERT INTO change_requests(
                 change_id, request_digest, repository_id, source_snapshot_digest,
-                state, request_json, latest_patch_revision, created_unix_ms, updated_unix_ms
-             ) VALUES(?1, ?2, ?3, ?4, 'prepared', ?5, ?6, ?7, ?7)
+                state, request_json, latest_patch_revision, created_unix_ms, updated_unix_ms,
+                role_profile_id, role_profile_revision, role_profile_definition_digest
+             ) VALUES(?1, ?2, ?3, ?4, 'prepared', ?5, ?6, ?7, ?7, ?8, ?9, ?10)
              ON CONFLICT(change_id) DO NOTHING",
             params![
                 patch.change_id.to_string(),
@@ -200,7 +372,10 @@ impl RuntimeStore {
                 patch.source_snapshot.to_string(),
                 request_json,
                 patch.revision,
-                now
+                now,
+                role_profile_provenance.map(|value| value.profile_id.as_str()),
+                role_profile_provenance.map(|value| value.revision),
+                role_profile_provenance.map(|value| value.definition_digest.to_string()),
             ],
         )?;
         transaction.execute(
@@ -268,7 +443,9 @@ impl RuntimeStore {
             .query_row(
                 "SELECT c.request_json, c.request_digest, c.repository_id,
                         c.source_snapshot_digest, c.state, p.artifact_json,
-                        p.declared_output_json, c.repair_attempted, c.created_unix_ms
+                        p.declared_output_json, c.repair_attempted, c.created_unix_ms,
+                        c.role_profile_id, c.role_profile_revision,
+                        c.role_profile_definition_digest
                  FROM change_requests c
                  JOIN patch_artifacts p
                    ON p.change_id=c.change_id AND p.revision=c.latest_patch_revision
@@ -285,6 +462,9 @@ impl RuntimeStore {
                         row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
                     ))
                 },
             )
@@ -299,6 +479,9 @@ impl RuntimeStore {
             output,
             repair_attempted,
             created,
+            role_profile_id,
+            role_profile_revision,
+            role_profile_definition_digest,
         )) = row
         else {
             return Ok(None);
@@ -315,6 +498,11 @@ impl RuntimeStore {
             declared_output: serde_json::from_str(&output)?,
             repair_attempted,
             created_unix_ms: created,
+            role_profile_provenance: parse_role_profile_provenance((
+                role_profile_id,
+                role_profile_revision,
+                role_profile_definition_digest,
+            ))?,
         }))
     }
 
@@ -346,12 +534,21 @@ impl RuntimeStore {
         change_id: &ChangeId,
         reason: &str,
     ) -> Result<(), StoreError> {
-        let payload = serde_json::json!({"reason": reason});
-        let payload_json = serde_json::to_string(&payload)?;
-        let payload_digest = Digest::blake3(payload_json.as_bytes());
         let now = now_ms();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
+        let provenance = change_role_profile_provenance(&transaction, change_id)?;
+        // Provider and cleanup diagnostics can contain paths or prompt text.
+        // Persist only a stable classification and digest in the audit event.
+        let payload = with_role_profile_provenance(
+            &serde_json::json!({
+                "reason": "change preparation failed",
+                "reason_digest": Digest::blake3(reason.as_bytes()),
+            }),
+            provenance.as_ref(),
+        );
+        let payload_json = serde_json::to_string(&payload)?;
+        let payload_digest = Digest::blake3(payload_json.as_bytes());
         let changed = transaction.execute(
             "UPDATE change_requests SET state='failed', updated_unix_ms=?2 WHERE change_id=?1",
             params![change_id.to_string(), now],
@@ -404,6 +601,7 @@ impl RuntimeStore {
                     && artifact.is_canonical()
             })
             .ok_or_else(|| StoreError::ChangeConflict(change_id.to_string()))?;
+        let provenance = change_role_profile_provenance(&transaction, change_id)?;
         let changed = transaction.execute(
             "UPDATE change_requests
              SET state='repairing', repair_attempted=1, updated_unix_ms=?2
@@ -414,11 +612,14 @@ impl RuntimeStore {
         if changed != 1 {
             return Err(StoreError::ChangeConflict(change_id.to_string()));
         }
-        let payload_json = serde_json::to_string(&serde_json::json!({
-            "patch_id": patch_id,
-            "verification_id": verification.id,
-            "state": "repairing"
-        }))?;
+        let payload_json = serde_json::to_string(&with_role_profile_provenance(
+            &serde_json::json!({
+                "patch_id": patch_id,
+                "verification_id": verification.id,
+                "state": "repairing"
+            }),
+            provenance.as_ref(),
+        ))?;
         transaction.execute(
             "INSERT INTO change_events(
                 change_id, event_type, payload_digest, payload_json, created_unix_ms
@@ -455,23 +656,34 @@ impl RuntimeStore {
         usage: &serde_json::Value,
         cost_microusd: Option<u64>,
     ) -> Result<(), StoreError> {
+        self.record_verification_artifact_with_provenance(
+            artifact,
+            attempt,
+            usage,
+            cost_microusd,
+            None,
+        )
+    }
+
+    pub fn record_verification_artifact_with_provenance(
+        &self,
+        artifact: &VerificationArtifact,
+        attempt: &serde_json::Value,
+        usage: &serde_json::Value,
+        cost_microusd: Option<u64>,
+        role_profile_provenance: Option<&RoleProfileProvenance>,
+    ) -> Result<(), StoreError> {
         if !artifact.is_canonical() || artifact.verdict == VerificationStatus::NotRequested {
             return Err(StoreError::PatchArtifact(
                 "verification artifact is not canonical".to_owned(),
             ));
         }
         let artifact_json = serde_json::to_string(artifact)?;
-        let attempt_json = serde_json::to_string(attempt)?;
+        let attempt_json =
+            serde_json::to_string(&with_role_profile_provenance(attempt, role_profile_provenance))?;
         let usage_json = serde_json::to_string(usage)?;
         let verdict =
             serde_json::to_value(artifact.verdict)?.as_str().unwrap_or("inconclusive").to_owned();
-        let event_payload = serde_json::json!({
-            "verification_id": artifact.id,
-            "patch_id": artifact.patch_id,
-            "verdict": verdict
-        });
-        let event_json = serde_json::to_string(&event_payload)?;
-        let event_digest = Digest::blake3(event_json.as_bytes());
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let patch_exists: u64 = transaction.query_row(
@@ -488,6 +700,21 @@ impl RuntimeStore {
                 "verification references an unknown patch".to_owned(),
             ));
         }
+        let stored_provenance = require_change_role_profile_provenance(
+            &transaction,
+            &artifact.change_id,
+            role_profile_provenance,
+        )?;
+        let event_payload = with_role_profile_provenance(
+            &serde_json::json!({
+                "verification_id": artifact.id,
+                "patch_id": artifact.patch_id,
+                "verdict": verdict
+            }),
+            stored_provenance.as_ref(),
+        );
+        let event_json = serde_json::to_string(&event_payload)?;
+        let event_digest = Digest::blake3(event_json.as_bytes());
         transaction.execute(
             "INSERT INTO verification_artifacts(
                 verification_id, change_id, patch_id, verdict, artifact_json, created_unix_ms
@@ -504,15 +731,19 @@ impl RuntimeStore {
         transaction.execute(
             "INSERT INTO change_attempts(
                 change_id, patch_id, role, attempt_json, usage_json, cost_microusd,
-                created_unix_ms
-             ) VALUES(?1, ?2, 'verifier', ?3, ?4, ?5, ?6)",
+                created_unix_ms, role_profile_id, role_profile_revision,
+                role_profile_definition_digest
+             ) VALUES(?1, ?2, 'verifier', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 artifact.change_id.to_string(),
                 artifact.patch_id.to_string(),
                 attempt_json,
                 usage_json,
                 cost_microusd,
-                artifact.created_unix_ms
+                artifact.created_unix_ms,
+                role_profile_provenance.map(|value| value.profile_id.as_str()),
+                role_profile_provenance.map(|value| value.revision),
+                role_profile_provenance.map(|value| value.definition_digest.to_string()),
             ],
         )?;
         transaction.execute(
@@ -543,6 +774,27 @@ impl RuntimeStore {
         cost_microusd: Option<u64>,
         created_unix_ms: u64,
     ) -> Result<(), StoreError> {
+        self.record_patch_attempt_with_provenance(
+            change_id,
+            patch_id,
+            attempt,
+            usage,
+            cost_microusd,
+            created_unix_ms,
+            None,
+        )
+    }
+
+    pub fn record_patch_attempt_with_provenance(
+        &self,
+        change_id: &ChangeId,
+        patch_id: PatchId,
+        attempt: &serde_json::Value,
+        usage: &serde_json::Value,
+        cost_microusd: Option<u64>,
+        created_unix_ms: u64,
+        role_profile_provenance: Option<&RoleProfileProvenance>,
+    ) -> Result<(), StoreError> {
         let connection = self.connection()?;
         let patch_exists: u64 = connection.query_row(
             "SELECT COUNT(*) FROM patch_artifacts WHERE patch_id=?1 AND change_id=?2",
@@ -554,18 +806,26 @@ impl RuntimeStore {
                 "patch attempt references an unknown patch".to_owned(),
             ));
         }
+        require_change_role_profile_provenance(&connection, change_id, role_profile_provenance)?;
         connection.execute(
             "INSERT INTO change_attempts(
                 change_id, patch_id, role, attempt_json, usage_json, cost_microusd,
-                created_unix_ms
-             ) VALUES(?1, ?2, 'patcher', ?3, ?4, ?5, ?6)",
+                created_unix_ms, role_profile_id, role_profile_revision,
+                role_profile_definition_digest
+             ) VALUES(?1, ?2, 'patcher', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 change_id.to_string(),
                 patch_id.to_string(),
-                serde_json::to_string(attempt)?,
+                serde_json::to_string(&with_role_profile_provenance(
+                    attempt,
+                    role_profile_provenance,
+                ))?,
                 serde_json::to_string(usage)?,
                 cost_microusd,
-                created_unix_ms
+                created_unix_ms,
+                role_profile_provenance.map(|value| value.profile_id.as_str()),
+                role_profile_provenance.map(|value| value.revision),
+                role_profile_provenance.map(|value| value.definition_digest.to_string()),
             ],
         )?;
         Ok(())
@@ -577,7 +837,8 @@ impl RuntimeStore {
     ) -> Result<Vec<ChangeAttemptRecord>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT role, patch_id, attempt_json, usage_json, cost_microusd, created_unix_ms
+            "SELECT role, patch_id, attempt_json, usage_json, cost_microusd, created_unix_ms,
+                    role_profile_id, role_profile_revision, role_profile_definition_digest
              FROM change_attempts WHERE change_id=?1 ORDER BY attempt_id",
         )?;
         let rows = statement.query_map([change_id.to_string()], |row| {
@@ -588,10 +849,23 @@ impl RuntimeStore {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<u64>>(4)?,
                 row.get::<_, u64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<u64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         rows.map(|row| {
-            let (role, patch_id, attempt, usage, cost_microusd, created_unix_ms) = row?;
+            let (
+                role,
+                patch_id,
+                attempt,
+                usage,
+                cost_microusd,
+                created_unix_ms,
+                role_profile_id,
+                role_profile_revision,
+                role_profile_definition_digest,
+            ) = row?;
             Ok(ChangeAttemptRecord {
                 role,
                 patch_id: PatchId(
@@ -601,6 +875,11 @@ impl RuntimeStore {
                 usage: serde_json::from_str(&usage)?,
                 cost_microusd,
                 created_unix_ms,
+                role_profile_provenance: parse_role_profile_provenance((
+                    role_profile_id,
+                    role_profile_revision,
+                    role_profile_definition_digest,
+                ))?,
             })
         })
         .collect()
@@ -655,7 +934,9 @@ impl RuntimeStore {
             .query_row(
                 "SELECT c.request_json, c.request_digest, c.repository_id,
                         c.source_snapshot_digest, c.state, p.artifact_json,
-                        p.declared_output_json, c.repair_attempted, c.created_unix_ms
+                        p.declared_output_json, c.repair_attempted, c.created_unix_ms,
+                        c.role_profile_id, c.role_profile_revision,
+                        c.role_profile_definition_digest
                  FROM change_requests c
                  JOIN patch_artifacts p
                    ON p.change_id=c.change_id AND p.revision=c.latest_patch_revision
@@ -672,6 +953,9 @@ impl RuntimeStore {
                         row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
                     ))
                 },
             )
@@ -686,6 +970,9 @@ impl RuntimeStore {
             output,
             repair_attempted,
             created,
+            role_profile_id,
+            role_profile_revision,
+            role_profile_definition_digest,
         )) = current_row
         else {
             return Err(StoreError::ChangeConflict(record.change_id.to_string()));
@@ -702,6 +989,11 @@ impl RuntimeStore {
             declared_output: serde_json::from_str(&output)?,
             repair_attempted,
             created_unix_ms: created,
+            role_profile_provenance: parse_role_profile_provenance((
+                role_profile_id,
+                role_profile_revision,
+                role_profile_definition_digest,
+            ))?,
         };
         let verification_json: Option<String> = transaction
             .query_row(
@@ -758,11 +1050,15 @@ impl RuntimeStore {
             "UPDATE change_requests SET state='applying', updated_unix_ms=?2 WHERE change_id=?1",
             params![record.change_id.to_string(), record.created_unix_ms],
         )?;
-        let event_json = serde_json::to_string(&serde_json::json!({
-            "apply_id": record.id,
-            "patch_id": record.patch_id,
-            "state": "applying"
-        }))?;
+        let provenance = change_role_profile_provenance(&transaction, &record.change_id)?;
+        let event_json = serde_json::to_string(&with_role_profile_provenance(
+            &serde_json::json!({
+                "apply_id": record.id,
+                "patch_id": record.patch_id,
+                "state": "applying"
+            }),
+            provenance.as_ref(),
+        ))?;
         transaction.execute(
             "INSERT INTO change_events(
                 change_id, event_type, payload_digest, payload_json, created_unix_ms
@@ -795,6 +1091,9 @@ impl RuntimeStore {
             [apply_id.to_string()],
             |row| row.get(0),
         )?;
+        let parsed_change_id = ChangeId::parse(&change_id)
+            .map_err(|error| StoreError::PatchArtifact(error.to_owned()))?;
+        let provenance = change_role_profile_provenance(&transaction, &parsed_change_id)?;
         transaction.execute(
             "UPDATE change_applies
              SET status=?2, post_snapshot_digest=?3, completed_unix_ms=?4
@@ -816,11 +1115,14 @@ impl RuntimeStore {
             "UPDATE change_requests SET state=?2, updated_unix_ms=?3 WHERE change_id=?1",
             params![change_id, change_state, completed_unix_ms],
         )?;
-        let event_json = serde_json::to_string(&serde_json::json!({
-            "apply_id": apply_id,
-            "state": apply_status_name(status),
-            "post_snapshot": post_snapshot
-        }))?;
+        let event_json = serde_json::to_string(&with_role_profile_provenance(
+            &serde_json::json!({
+                "apply_id": apply_id,
+                "state": apply_status_name(status),
+                "post_snapshot": post_snapshot
+            }),
+            provenance.as_ref(),
+        ))?;
         transaction.execute(
             "INSERT INTO change_events(
                 change_id, event_type, payload_digest, payload_json, created_unix_ms
@@ -974,13 +1276,50 @@ fn decode_apply_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChangeApplyR
 mod tests {
     use super::*;
     use needle_core::{
-        AcceptanceCoverage, AcceptanceStatus, AllowedPath, AllowedPathScope, PatchFile,
-        PatchOperation,
+        AcceptanceCoverage, AcceptanceStatus, AllowedPath, AllowedPathScope, CodexHost, CodexRole,
+        CommandPolicy, FallbackPolicy, FilesystemPolicy, NetworkPolicy, PatchFile, PatchOperation,
+        RepairPolicy, RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput,
+        RoleProfileId, ServiceTier, TestPolicy, ToolPolicy,
     };
     use std::fs;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn active_profile_provenance(store: &RuntimeStore) -> RoleProfileProvenance {
+        let definition = RoleProfileDefinition::new(RoleProfileDefinitionInput {
+            profile_id: RoleProfileId::new("change.implementer").unwrap(),
+            role: CodexRole::Implementer,
+            host: CodexHost::Codex,
+            model: "offline-change-worker".to_owned(),
+            reasoning: needle_core::ReasoningLevel::Medium,
+            service_tier: ServiceTier::Default,
+            timeout_seconds: 30,
+            budget: RoleProfileBudget {
+                max_turns: 2,
+                max_output_tokens: 1200,
+                max_cost_microusd: 1000,
+            },
+            prompt_profile_digest: Digest::blake3(b"change-prompt"),
+            output_contract_digest: Digest::blake3(b"change-output"),
+            tool_policy: ToolPolicy::IsolatedWrite,
+            command_policy: CommandPolicy::Denied,
+            filesystem_policy: FilesystemPolicy::DisposableCheckout,
+            network_policy: NetworkPolicy::Denied,
+            test_policy: TestPolicy::Disabled,
+            repair_policy: RepairPolicy::Once,
+            fallback_policy: FallbackPolicy::Native,
+            concurrency: 1,
+            route_assignments: Vec::new(),
+        })
+        .unwrap();
+        let revision = store.create_role_profile(definition).unwrap();
+        let state = store.role_profile_state(&revision.profile_id).unwrap();
+        store
+            .activate_role_profile(&revision.profile_id, revision.revision, state.state_digest)
+            .unwrap();
+        RoleProfileProvenance::from_revision(&revision).unwrap()
+    }
 
     #[test]
     fn failed_request_is_audited_before_any_patch_exists() {
@@ -989,6 +1328,7 @@ mod tests {
             .join(format!("needle-change-request-audit-{}-{suffix}.sqlite3", std::process::id()));
         let store = RuntimeStore::new(&path);
         store.initialize().unwrap();
+        let provenance = active_profile_provenance(&store);
         let request = ChangeRequest {
             task: "Update the fixture.".to_owned(),
             acceptance_criteria: vec!["The fixture changes.".to_owned()],
@@ -1004,15 +1344,17 @@ mod tests {
         let request_digest = request.digest(source);
         let change_id = ChangeId::from_digest(Digest::blake3(b"failed-change"));
         store
-            .record_change_request(
+            .record_change_request_with_provenance(
                 &change_id,
                 Digest::blake3(b"repository"),
                 source,
                 request_digest,
                 &request,
+                Some(&provenance),
             )
             .unwrap();
-        store.record_change_failure(&change_id, "worker failed").unwrap();
+        let sensitive_reason = "worker failed at C:\\private\\repo with raw prompt text";
+        store.record_change_failure(&change_id, sensitive_reason).unwrap();
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         let (state, revision): (String, u32) = connection
@@ -1032,6 +1374,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(events, 2);
+        let payloads = connection
+            .prepare("SELECT payload_json FROM change_events WHERE change_id=?1 ORDER BY event_id")
+            .unwrap()
+            .query_map([change_id.to_string()], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for payload in &payloads {
+            let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(
+                payload.get("role_profile_provenance"),
+                Some(&serde_json::json!({
+                    "profile_id": provenance.profile_id,
+                    "revision": provenance.revision,
+                    "definition_digest": provenance.definition_digest,
+                }))
+            );
+        }
+        assert!(!payloads[1].contains(sensitive_reason));
+        assert!(!payloads[1].contains("C:\\\\private"));
+        assert!(payloads[1].contains("reason_digest"));
         drop(connection);
         drop(store);
         fs::remove_file(path).unwrap();

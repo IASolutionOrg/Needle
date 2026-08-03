@@ -291,7 +291,13 @@ impl CodexVerifier {
             "output_tokens": output_tokens
         });
         store
-            .record_verification_artifact(&artifact, &attempt, &usage, None)
+            .record_verification_artifact_with_provenance(
+                &artifact,
+                &attempt,
+                &usage,
+                None,
+                config.role_profile_provenance.as_ref(),
+            )
             .map_err(|error| error.to_string())?;
         Ok(VerifyChangeOutcome {
             artifact,
@@ -307,6 +313,15 @@ impl CodexVerifier {
         &self,
         change_id: &ChangeId,
         reason: &str,
+    ) -> Result<VerifyChangeOutcome, String> {
+        self.record_inconclusive_with_provenance(change_id, reason, None)
+    }
+
+    pub fn record_inconclusive_with_provenance(
+        &self,
+        change_id: &ChangeId,
+        reason: &str,
+        role_profile_provenance: Option<&needle_core::RoleProfileProvenance>,
     ) -> Result<VerifyChangeOutcome, String> {
         let store = RuntimeStore::new(self.data_directory.join("needle.sqlite3"));
         store.initialize().map_err(|error| error.to_string())?;
@@ -356,7 +371,7 @@ impl CodexVerifier {
             created_unix_ms,
         };
         store
-            .record_verification_artifact(
+            .record_verification_artifact_with_provenance(
                 &artifact,
                 &json!({"phase": "repair_orchestration", "verifier_started": false}),
                 &json!({
@@ -365,6 +380,7 @@ impl CodexVerifier {
                     "output_tokens": 0
                 }),
                 None,
+                role_profile_provenance,
             )
             .map_err(|error| error.to_string())?;
         Ok(VerifyChangeOutcome {
