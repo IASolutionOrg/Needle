@@ -26,3 +26,6 @@ thiserror.workspace = true
 tokio = { version = "1.47", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 rust-embed = "8"
+
+[dev-dependencies]
+tower = "0.5"
