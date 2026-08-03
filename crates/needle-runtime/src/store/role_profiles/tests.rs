@@ -1,8 +1,9 @@
 use super::*;
 use needle_core::{
-    CodexHost, CodexRole, CommandPolicy, FallbackPolicy, FilesystemPolicy, NetworkPolicy,
-    RepairPolicy, RoleProfileBudget, RoleProfileDefinitionInput, RoleProfileId, ServiceTier,
-    TestPolicy, ToolPolicy,
+    CacheLookup, CodexHost, CodexRole, CommandPolicy, FallbackPolicy, FilesystemPolicy,
+    NeedCacheEntry, NeedCacheIdentity, NeedKey, NeedResult, NetworkPolicy, RepairPolicy,
+    RoleProfileBudget, RoleProfileDefinitionInput, RoleProfileId, RoleProfileProvenance,
+    ServiceTier, TestPolicy, ToolPolicy, WorkerOutcome,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,14 +15,23 @@ fn temporary_store() -> (PathBuf, RuntimeStore) {
 }
 
 fn definition(id: &str) -> RoleProfileDefinition {
+    definition_with_execution(id, "gpt-5", 120, RepairPolicy::None)
+}
+
+fn definition_with_execution(
+    id: &str,
+    model: &str,
+    timeout_seconds: u64,
+    repair_policy: RepairPolicy,
+) -> RoleProfileDefinition {
     RoleProfileDefinition::new(RoleProfileDefinitionInput {
         profile_id: RoleProfileId::new(id).unwrap(),
         role: CodexRole::Explorer,
         host: CodexHost::Codex,
-        model: "gpt-5".to_owned(),
+        model: model.to_owned(),
         reasoning: needle_core::ReasoningLevel::Medium,
         service_tier: ServiceTier::Default,
-        timeout_seconds: 120,
+        timeout_seconds,
         budget: RoleProfileBudget {
             max_turns: 2,
             max_output_tokens: 1200,
@@ -34,7 +44,7 @@ fn definition(id: &str) -> RoleProfileDefinition {
         filesystem_policy: FilesystemPolicy::ReadOnlyCheckout,
         network_policy: NetworkPolicy::Denied,
         test_policy: TestPolicy::Disabled,
-        repair_policy: RepairPolicy::None,
+        repair_policy,
         fallback_policy: FallbackPolicy::Native,
         concurrency: 1,
         route_assignments: vec![],
@@ -80,7 +90,7 @@ fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, (1..=14).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=15).collect::<Vec<_>>());
     for name in
         ["role_profiles", "role_profile_revisions", "role_profile_state", "role_profile_audit"]
     {
@@ -217,6 +227,82 @@ fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
 }
 
 #[test]
+fn session_binding_is_idempotent_conflict_checked_and_historical() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("explorer.session")).unwrap();
+    let profile_id = first.profile_id.clone();
+    let state = store.role_profile_state(&profile_id).unwrap();
+    store.activate_role_profile(&profile_id, 1, state.state_digest).unwrap();
+
+    let prompt = Digest::blake3(b"session-prompt");
+    store
+        .record_session_start_profiled("session-a", prompt, Some("main"), None, &profile_id)
+        .unwrap();
+    store
+        .record_session_start_profiled("session-a", prompt, Some("main"), None, &profile_id)
+        .unwrap();
+    let frozen = store.worker_config_for_session("session-a", "codex-a").unwrap();
+    assert_eq!(frozen.model, "gpt-5");
+    assert_eq!(frozen.timeout_seconds, 120);
+    assert_eq!(
+        frozen.evidence_failure_policy,
+        needle_core::EvidenceFailurePolicy::DiscardInvalidFact
+    );
+
+    let state = store.role_profile_state(&profile_id).unwrap();
+    let second = store
+        .revise_role_profile(
+            &profile_id,
+            state.state_digest,
+            definition_with_execution("explorer.session", "gpt-5-mini", 240, RepairPolicy::Once),
+        )
+        .unwrap();
+    let state = store.role_profile_state(&profile_id).unwrap();
+    store.activate_role_profile(&profile_id, second.revision, state.state_digest).unwrap();
+
+    assert!(matches!(
+        store.record_session_start_profiled("session-a", prompt, Some("main"), None, &profile_id,),
+        Err(StoreError::RoleProfileConflict(_))
+    ));
+    let still_frozen = store.worker_config_for_session("session-a", "codex-a").unwrap();
+    assert_eq!(still_frozen.model, "gpt-5");
+    assert_eq!(still_frozen.timeout_seconds, 120);
+
+    store
+        .record_session_start_profiled("session-b", prompt, Some("main"), None, &profile_id)
+        .unwrap();
+    let current = store.worker_config_for_session("session-b", "codex-a").unwrap();
+    assert_eq!(current.model, "gpt-5-mini");
+    assert_eq!(current.timeout_seconds, 240);
+    assert_eq!(current.evidence_failure_policy, needle_core::EvidenceFailurePolicy::RepairOnce);
+
+    let connection = Connection::open(&path).unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE sessions
+             SET role_profile_revision=?2, role_profile_definition_digest=?3
+             WHERE session_id=?1",
+                rusqlite::params![
+                    "session-a",
+                    second.revision,
+                    second.definition.definition_digest.to_string(),
+                ],
+            )
+            .is_err()
+    );
+    drop(connection);
+
+    store.record_legacy_session_start("legacy", prompt, None, None).unwrap();
+    assert!(matches!(
+        store.record_session_start_profiled("legacy", prompt, None, None, &profile_id),
+        Err(StoreError::RoleProfileConflict(_))
+    ));
+    assert!(store.session("legacy").unwrap().unwrap().role_profile_provenance.is_none());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn bounded_revision_listing_reads_only_the_latest_ordered_window() {
     let (path, store) = temporary_store();
     let first = store.create_role_profile(definition("explorer.default")).unwrap();
@@ -246,6 +332,106 @@ fn bounded_revision_listing_reads_only_the_latest_ordered_window() {
         store.list_role_profile_revisions_bounded(&id, 101),
         Err(StoreError::RoleProfileValidation(_))
     ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn cache_identity_separates_revisions_and_rejects_unknown_or_mismatched_provenance() {
+    let (path, store) = temporary_store();
+    let first = store.create_role_profile(definition("explorer.cache")).unwrap();
+    let profile_id = first.profile_id.clone();
+    let state = store.role_profile_state(&profile_id).unwrap();
+    let second = store
+        .revise_role_profile(
+            &profile_id,
+            state.state_digest,
+            definition_with_execution("explorer.cache", "gpt-5-mini", 180, RepairPolicy::Once),
+        )
+        .unwrap();
+    let first_provenance = RoleProfileProvenance::from_revision(&first).unwrap();
+    let second_provenance = RoleProfileProvenance::from_revision(&second).unwrap();
+    let identity = |provenance: Option<RoleProfileProvenance>| NeedCacheIdentity {
+        repository_id: Digest::blake3(b"repository"),
+        source_snapshot_digest: Digest::blake3(b"source"),
+        prompt_profile_digest: Digest::blake3(b"prompt"),
+        route_definition_digest: Digest::blake3(b"route"),
+        preset_definition_digest: Digest::blake3(b"preset"),
+        need_key: NeedKey::new("trace.state-flow").unwrap(),
+        normalized_request_digest: Digest::blake3(b"request"),
+        worker_configuration_digest: Digest::blake3(b"worker"),
+        output_schema_digest: Digest::blake3(b"schema"),
+        role_profile_provenance: provenance,
+    };
+    let first_identity = identity(Some(first_provenance.clone()));
+    let second_identity = identity(Some(second_provenance.clone()));
+    assert_ne!(first_identity.digest(), second_identity.digest());
+    assert_ne!(first_identity.logical_digest(), second_identity.logical_digest());
+
+    let unknown = identity(Some(
+        RoleProfileProvenance::new(
+            RoleProfileId::new("ghost").unwrap(),
+            1,
+            Digest::blake3(b"ghost"),
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        store.cache_lookup(&unknown).unwrap(),
+        CacheLookup::Bypass(reason) if reason == "role-profile-provenance-invalid"
+    ));
+    assert!(matches!(
+        store.cache_lookup(&identity(None)).unwrap(),
+        CacheLookup::Bypass(reason) if reason == "role-profile-provenance-unknown"
+    ));
+
+    let result = NeedResult {
+        complete: true,
+        summary: "bounded".to_owned(),
+        claims: Vec::new(),
+        evidence: Vec::new(),
+        suggested_reads: Vec::new(),
+        suggested_commands: Vec::new(),
+        uncertainty: Vec::new(),
+    };
+    let outcome = |provenance: RoleProfileProvenance| WorkerOutcome {
+        result: result.clone(),
+        artifact_result: None,
+        semantic_artifact_result: None,
+        worker_model: "gpt-5".to_owned(),
+        worker_reasoning: "medium".to_owned(),
+        codex_version: "test".to_owned(),
+        input_tokens: Some(1),
+        cached_input_tokens: Some(0),
+        output_tokens: Some(1),
+        duration_ms: 1,
+        process_status: "success".to_owned(),
+        logical_worker_spawns: 1,
+        worker_turns: 1,
+        repair_performed: false,
+        discarded_facts: 0,
+        worker_session_id: None,
+        session_cleanup_success: Some(true),
+        role_profile_provenance: Some(provenance),
+    };
+    let mismatched = NeedCacheEntry {
+        identity: first_identity.clone(),
+        result: result.clone(),
+        worker_outcome: outcome(second_provenance),
+        created_unix_ms: 1,
+        hit_count: 0,
+    };
+    assert!(matches!(store.publish(&mismatched), Err(StoreError::ArtifactIdentity(_))));
+
+    let matching = NeedCacheEntry {
+        identity: first_identity.clone(),
+        result: result.clone(),
+        worker_outcome: outcome(first_provenance),
+        created_unix_ms: 1,
+        hit_count: 0,
+    };
+    store.publish(&matching).unwrap();
+    assert!(matches!(store.cache_lookup(&first_identity).unwrap(), CacheLookup::Hit(_)));
+    assert!(matches!(store.cache_lookup(&second_identity).unwrap(), CacheLookup::Miss));
     let _ = std::fs::remove_file(path);
 }
 
@@ -364,7 +550,7 @@ fn inconsistent_state_pointers_fail_closed_without_historical_fallback() {
 }
 
 #[test]
-fn v14_upgrades_a_valid_v13_database_and_rejects_checksum_drift() {
+fn v15_upgrades_a_valid_v14_database_without_attributing_legacy_rows() {
     let (path, store) = temporary_store();
     let connection = Connection::open(&path).unwrap();
     let migrations = [
@@ -381,6 +567,7 @@ fn v14_upgrades_a_valid_v13_database_and_rejects_checksum_drift() {
         (11, super::super::MIGRATION_V11),
         (12, super::super::MIGRATION_V12),
         (13, super::super::MIGRATION_V13),
+        (14, super::super::MIGRATION_V14),
     ];
     for (version, migration) in migrations {
         connection.execute_batch(migration).unwrap();
@@ -391,15 +578,36 @@ fn v14_upgrades_a_valid_v13_database_and_rejects_checksum_drift() {
             )
             .unwrap();
     }
+    connection
+        .execute(
+            "INSERT INTO sessions(
+                session_id, prompt_profile_digest, route_set_digest, updated_unix_ms
+             ) VALUES('legacy-session', ?1, ?2, 0)",
+            rusqlite::params![
+                Digest::blake3(b"prompt").to_string(),
+                Digest::blake3(b"routes").to_string()
+            ],
+        )
+        .unwrap();
     drop(connection);
     store.initialize().unwrap();
     let connection = Connection::open(&path).unwrap();
     let version: u32 = connection
         .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
+    let legacy: (Option<String>, Option<u64>, Option<String>) = connection
+        .query_row(
+            "SELECT role_profile_id, role_profile_revision,
+                    role_profile_definition_digest
+             FROM sessions WHERE session_id='legacy-session'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(legacy, (None, None, None));
     connection
-        .execute("UPDATE schema_migrations SET checksum='b3:invalid' WHERE version=14", [])
+        .execute("UPDATE schema_migrations SET checksum='b3:invalid' WHERE version=15", [])
         .unwrap();
     drop(connection);
     let drifted = RuntimeStore::new(&path);

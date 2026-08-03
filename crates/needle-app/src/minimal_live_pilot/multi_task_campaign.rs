@@ -254,6 +254,16 @@ fn observe_pair(
             native_fallback: false,
         })
         .map_err(|error| AppError::Experiment(error.to_string()))?;
+    let role_profile_id = provision_experiment_role_profile(
+        &store,
+        "multi-task-live.explorer",
+        prompt_profile_digest,
+        context.worker_model,
+        context.worker_reasoning,
+        context.service_tier,
+        context.timeout.as_secs().min(600),
+        false,
+    )?;
 
     let quality_spec = quality_spec_for_task(task, oracle)?;
     let main_only = observe_direct_main(DirectObservation {
@@ -278,6 +288,7 @@ fn observe_pair(
         source_snapshot_digest,
         repository_id,
         prompt_profile_digest,
+        role_profile_id: &role_profile_id,
         main_instructions,
         prompt: &task.prompt,
         declared_test_plan: &declared_test_plan,

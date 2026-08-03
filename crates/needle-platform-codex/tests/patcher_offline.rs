@@ -52,6 +52,7 @@ fn patcher_changes_only_disposable_checkout_and_persists_filesystem_patch() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let store = RuntimeStore::new(data.join("needle.sqlite3"));
     store
@@ -192,6 +193,7 @@ fn repairable_patch_gets_exactly_one_revision_and_independent_reverification() {
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let store = RuntimeStore::new(data.join("needle.sqlite3"));
     store
@@ -280,6 +282,7 @@ fn run_certified_plan_scenario(name: &str, plan_count: usize, duplicate: bool, s
         service_tier: Some("default".to_owned()),
         timeout_seconds: 10,
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     store
         .initialize_defaults(&RuntimeSettings {

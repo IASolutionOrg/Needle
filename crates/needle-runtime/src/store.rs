@@ -5,10 +5,10 @@ use needle_core::{
     CommandClassification, CommandExecutionEvidence, Digest, EvidenceFailurePolicy,
     MainTurnOutcome, ModelPolicy, MultiNeedPolicy, Need, NeedCacheEntry, NeedCacheIdentity,
     NeedFragment, NeedIr, NeedStep, NeedStepRelation, NeedStepState, Preset,
-    ReuseSufficiencyCertificate, Route, SelectedPlan, SemanticInterrupt, TestPlan, WorkerConfig,
-    WorkerFailure, WorkerOutcome, WorkerProfile, built_in_capability_classes,
-    built_in_claim_capability_classes, built_in_predicate_contracts, built_in_route_contracts,
-    built_in_route_plans,
+    ReuseSufficiencyCertificate, RoleProfileId, RoleProfileProvenance, RoleProfileRevision, Route,
+    SelectedPlan, SemanticInterrupt, TestPlan, WorkerConfig, WorkerFailure, WorkerOutcome,
+    WorkerProfile, built_in_capability_classes, built_in_claim_capability_classes,
+    built_in_predicate_contracts, built_in_route_contracts, built_in_route_plans,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -791,6 +791,99 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_V15: &str = r#"
+ALTER TABLE sessions ADD COLUMN role_profile_id TEXT;
+ALTER TABLE sessions ADD COLUMN role_profile_revision INTEGER;
+ALTER TABLE sessions ADD COLUMN role_profile_definition_digest TEXT;
+ALTER TABLE worker_runs ADD COLUMN role_profile_id TEXT;
+ALTER TABLE worker_runs ADD COLUMN role_profile_revision INTEGER;
+ALTER TABLE worker_runs ADD COLUMN role_profile_definition_digest TEXT;
+ALTER TABLE change_attempts ADD COLUMN role_profile_id TEXT;
+ALTER TABLE change_attempts ADD COLUMN role_profile_revision INTEGER;
+ALTER TABLE change_attempts ADD COLUMN role_profile_definition_digest TEXT;
+ALTER TABLE change_requests ADD COLUMN role_profile_id TEXT;
+ALTER TABLE change_requests ADD COLUMN role_profile_revision INTEGER;
+ALTER TABLE change_requests ADD COLUMN role_profile_definition_digest TEXT;
+CREATE TRIGGER sessions_role_profile_provenance_all_or_none_insert
+BEFORE INSERT ON sessions
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'session role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER sessions_role_profile_provenance_all_or_none_update
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON sessions
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'session role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER sessions_role_profile_provenance_immutable
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON sessions
+WHEN NEW.role_profile_id IS NOT OLD.role_profile_id
+  OR NEW.role_profile_revision IS NOT OLD.role_profile_revision
+  OR NEW.role_profile_definition_digest IS NOT OLD.role_profile_definition_digest
+BEGIN
+    SELECT RAISE(ABORT, 'session role-profile provenance is immutable');
+END;
+CREATE TRIGGER worker_runs_role_profile_provenance_all_or_none_insert
+BEFORE INSERT ON worker_runs
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'worker-run role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER worker_runs_role_profile_provenance_all_or_none_update
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON worker_runs
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'worker-run role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER change_attempts_role_profile_provenance_all_or_none_insert
+BEFORE INSERT ON change_attempts
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'change-attempt role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER change_attempts_role_profile_provenance_all_or_none_update
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON change_attempts
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'change-attempt role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER change_requests_role_profile_provenance_all_or_none_insert
+BEFORE INSERT ON change_requests
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'change-request role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER change_requests_role_profile_provenance_all_or_none_update
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON change_requests
+WHEN (NEW.role_profile_id IS NULL) != (NEW.role_profile_revision IS NULL)
+  OR (NEW.role_profile_id IS NULL) != (NEW.role_profile_definition_digest IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'change-request role-profile provenance must be all NULL or all set');
+END;
+CREATE TRIGGER change_requests_role_profile_provenance_immutable
+BEFORE UPDATE OF role_profile_id, role_profile_revision, role_profile_definition_digest
+ON change_requests
+WHEN NEW.role_profile_id IS NOT OLD.role_profile_id
+  OR NEW.role_profile_revision IS NOT OLD.role_profile_revision
+  OR NEW.role_profile_definition_digest IS NOT OLD.role_profile_definition_digest
+BEGIN
+    SELECT RAISE(ABORT, 'change-request role-profile provenance is immutable');
+END;
+"#;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database operation failed: {0}")]
@@ -912,6 +1005,7 @@ pub struct SessionRecord {
     pub route_set: Vec<Route>,
     pub multi_need_policy: MultiNeedPolicy,
     pub multi_need_policy_digest: Digest,
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -973,6 +1067,7 @@ impl RuntimeSettings {
             service_tier: None,
             timeout_seconds: self.worker_timeout_seconds,
             evidence_failure_policy: self.evidence_failure_policy,
+            role_profile_provenance: None,
         }
     }
 }
@@ -1010,6 +1105,7 @@ pub struct WorkerRunRecord {
     pub repair_performed: bool,
     pub worker_session_id: Option<String>,
     pub session_cleanup_success: Option<bool>,
+    pub role_profile_provenance: Option<RoleProfileProvenance>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1154,6 +1250,7 @@ impl RuntimeStore {
         apply_migration(&mut connection, 12, MIGRATION_V12)?;
         apply_migration(&mut connection, 13, MIGRATION_V13)?;
         apply_migration(&mut connection, 14, MIGRATION_V14)?;
+        apply_migration(&mut connection, 15, MIGRATION_V15)?;
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('utility_gate_passed', '0')",
             [],
@@ -2051,6 +2148,158 @@ impl RuntimeStore {
         Ok(())
     }
 
+    /// Starts a production session bound to the currently active revision of
+    /// an explicitly selected role profile. The active lookup and immutable
+    /// session insert share one immediate transaction.
+    pub fn record_session_start_profiled(
+        &self,
+        session_id: &str,
+        prompt_profile_digest: Digest,
+        model: Option<&str>,
+        cwd: Option<&str>,
+        profile_id: &RoleProfileId,
+    ) -> Result<(), StoreError> {
+        self.record_session_start_for_transport_profiled(
+            session_id,
+            prompt_profile_digest,
+            model,
+            cwd,
+            "hook",
+            needle_core::need_grammar_definition_digest(),
+            Some(needle_core::need_grammar_definition_digest()),
+            profile_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_session_start_for_transport_profiled(
+        &self,
+        session_id: &str,
+        prompt_profile_digest: Digest,
+        model: Option<&str>,
+        cwd: Option<&str>,
+        transport: &str,
+        transport_definition_digest: Digest,
+        need_grammar_digest: Option<Digest>,
+        profile_id: &RoleProfileId,
+    ) -> Result<(), StoreError> {
+        self.initialize()?;
+        let route_set = self.routes()?;
+        let route_set_digest = route_set_digest(&route_set);
+        let multi_need_policy = self.multi_need_policy()?;
+        let multi_need_policy_digest = multi_need_policy.digest();
+        let mut connection = self.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let active_revision: Option<u64> = transaction
+            .query_row(
+                "SELECT active_revision FROM role_profile_state WHERE profile_id=?1",
+                [profile_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(revision) = active_revision else {
+            return Err(StoreError::RoleProfileConflict(format!(
+                "profile {profile_id} has no active revision"
+            )));
+        };
+        let (definition_json, row_digest, created_unix_ms, activated_unix_ms): (
+            String,
+            String,
+            u64,
+            Option<u64>,
+        ) = transaction.query_row(
+            "SELECT definition_json, definition_digest, created_unix_ms, activated_unix_ms
+             FROM role_profile_revisions WHERE profile_id=?1 AND revision=?2",
+            params![profile_id.as_str(), revision],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let definition: needle_core::RoleProfileDefinition =
+            serde_json::from_str(&definition_json)?;
+        definition
+            .validate()
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+        let parsed_row_digest = Digest::parse(&row_digest)
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+        if definition.profile_id != *profile_id
+            || definition.definition_digest != parsed_row_digest
+            || activated_unix_ms.is_none()
+        {
+            return Err(StoreError::RoleProfileCorruption(
+                "active role-profile revision identity or activation metadata is invalid"
+                    .to_owned(),
+            ));
+        }
+        let revision_record = RoleProfileRevision {
+            profile_id: profile_id.clone(),
+            revision,
+            definition,
+            state: needle_core::RoleProfileState::Active,
+            created_unix_ms,
+            activated_unix_ms,
+        };
+        let provenance = RoleProfileProvenance::from_revision(&revision_record)
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+        transaction.execute(
+            "INSERT INTO sessions(
+                session_id, prompt_profile_digest, route_set_digest, model, cwd, updated_unix_ms,
+                route_set_json, need_grammar_digest, multi_need_policy_json,
+                multi_need_policy_digest, transport, transport_definition_digest,
+                semantic_definition_digest, role_profile_id, role_profile_revision,
+                role_profile_definition_digest
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(session_id) DO NOTHING",
+            params![
+                session_id,
+                prompt_profile_digest.to_string(),
+                route_set_digest.to_string(),
+                model,
+                cwd,
+                now_ms(),
+                serde_json::to_string(&route_set)?,
+                need_grammar_digest.map(|digest| digest.to_string()),
+                serde_json::to_string(&multi_need_policy)?,
+                multi_need_policy_digest.to_string(),
+                transport,
+                transport_definition_digest.to_string(),
+                needle_core::need_ir_definition_digest().to_string(),
+                provenance.profile_id.as_str(),
+                provenance.revision,
+                provenance.definition_digest.to_string(),
+            ],
+        )?;
+        let existing: (Option<String>, Option<u64>, Option<String>) = transaction.query_row(
+            "SELECT role_profile_id, role_profile_revision, role_profile_definition_digest
+             FROM sessions WHERE session_id=?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let existing = parse_role_profile_provenance(existing)?;
+        if existing.as_ref() != Some(&provenance) {
+            return Err(StoreError::RoleProfileConflict(format!(
+                "session {session_id} is already bound to a different role-profile revision"
+            )));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Explicitly named legacy insertion helper retained for migration and
+    /// backward-compatibility tests. Production entry points must use one of
+    /// the profiled methods above.
+    pub fn record_legacy_session_start(
+        &self,
+        session_id: &str,
+        prompt_profile_digest: Digest,
+        model: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.record_session_start(session_id, prompt_profile_digest, model, cwd)
+    }
+
     pub fn record_user_prompt(
         &self,
         session_id: &str,
@@ -2086,7 +2335,9 @@ impl RuntimeStore {
                 "SELECT session_id, turn_id, root_task, prompt_profile_digest, route_set_digest,
                         model, cwd, route_set_json, need_grammar_digest,
                         multi_need_policy_json, multi_need_policy_digest, transport,
-                        transport_definition_digest, semantic_definition_digest
+                        transport_definition_digest, semantic_definition_digest,
+                        role_profile_id, role_profile_revision,
+                        role_profile_definition_digest
                  FROM sessions WHERE session_id=?1",
                 [session_id],
                 |row| {
@@ -2105,6 +2356,9 @@ impl RuntimeStore {
                         row.get::<_, Option<String>>(11)?,
                         row.get::<_, Option<String>>(12)?,
                         row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<u64>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
                     ))
                 },
             )
@@ -2126,11 +2380,24 @@ impl RuntimeStore {
                     transport,
                     transport_definition_digest,
                     semantic_definition_digest,
+                    role_profile_id,
+                    role_profile_revision,
+                    role_profile_definition_digest,
                 )| {
                     let route_set = routes
                         .map(|value| serde_json::from_str(&value))
                         .transpose()?
                         .unwrap_or_default();
+                    let role_profile_provenance = parse_role_profile_provenance((
+                        role_profile_id,
+                        role_profile_revision,
+                        role_profile_definition_digest,
+                    ))?;
+                    if let Some(provenance) = &role_profile_provenance {
+                        provenance.validate().map_err(|error| {
+                            StoreError::RoleProfileCorruption(error.to_string())
+                        })?;
+                    }
                     Ok(SessionRecord {
                         session_id,
                         turn_id,
@@ -2169,10 +2436,68 @@ impl RuntimeStore {
                             .transpose()
                             .map_err(|error| StoreError::Digest(error.to_string()))?
                             .unwrap_or_else(|| MultiNeedPolicy::default().digest()),
+                        role_profile_provenance,
                     })
                 },
             )
             .transpose()
+    }
+
+    /// Resolve the exact historical revision frozen on a session. Active
+    /// pointers are intentionally never consulted here.
+    pub fn resolve_session_worker_config(
+        &self,
+        session_id: &str,
+        executable: impl Into<String>,
+    ) -> Result<WorkerConfig, StoreError> {
+        let session = self
+            .session(session_id)?
+            .ok_or_else(|| StoreError::RoleProfileNotFound(format!("session {session_id}")))?;
+        let provenance = session.role_profile_provenance.ok_or_else(|| {
+            StoreError::RoleProfileConflict(
+                "session has unknown role-profile provenance".to_owned(),
+            )
+        })?;
+        let revision =
+            self.read_role_profile_revision(&provenance.profile_id, provenance.revision)?;
+        let actual = RoleProfileProvenance::from_revision(&revision)
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+        if actual != provenance {
+            return Err(StoreError::RoleProfileCorruption(
+                "session role-profile provenance does not match historical revision".to_owned(),
+            ));
+        }
+        revision
+            .to_worker_config(executable)
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))
+    }
+
+    pub fn worker_config_for_session(
+        &self,
+        session_id: &str,
+        executable: impl Into<String>,
+    ) -> Result<WorkerConfig, StoreError> {
+        self.resolve_session_worker_config(session_id, executable)
+    }
+
+    /// Checks a bounded provenance value against immutable historical storage.
+    /// Current activation state is irrelevant; the exact revision and digest
+    /// must still exist and validate.
+    pub fn role_profile_provenance_is_historical(
+        &self,
+        provenance: &RoleProfileProvenance,
+    ) -> Result<bool, StoreError> {
+        provenance
+            .validate()
+            .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+        match self.read_role_profile_revision_by_digest(
+            &provenance.profile_id,
+            provenance.definition_digest,
+        ) {
+            Ok(revision) => Ok(revision.revision == provenance.revision),
+            Err(StoreError::RoleProfileNotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn record_need_step(
@@ -2619,6 +2944,12 @@ impl RuntimeStore {
     }
 
     pub fn cache_lookup(&self, identity: &NeedCacheIdentity) -> Result<CacheLookup, StoreError> {
+        let Some(requested_provenance) = identity.role_profile_provenance.as_ref() else {
+            return Ok(CacheLookup::Bypass("role-profile-provenance-unknown".to_owned()));
+        };
+        if !self.role_profile_provenance_is_historical(requested_provenance)? {
+            return Ok(CacheLookup::Bypass("role-profile-provenance-invalid".to_owned()));
+        }
         let connection = self.connection()?;
         let digest = identity.digest().to_string();
         let json: Option<String> = connection
@@ -2629,16 +2960,24 @@ impl RuntimeStore {
             )
             .optional()?;
         if let Some(json) = json {
-            connection.execute(
-                "UPDATE cache_entries SET hit_count=hit_count+1 WHERE identity_digest=?1",
-                [&digest],
-            )?;
             let mut entry: NeedCacheEntry = serde_json::from_str(&json)?;
             if entry.identity.digest().to_string() != digest {
                 return Err(StoreError::Digest(
                     "cache entry identity does not match its primary key".to_owned(),
                 ));
             }
+            if entry.identity.role_profile_provenance.as_ref() != Some(requested_provenance)
+                || entry.worker_outcome.role_profile_provenance.as_ref()
+                    != Some(requested_provenance)
+            {
+                return Err(StoreError::ArtifactIdentity(
+                    "cache entry role-profile provenance is inconsistent".to_owned(),
+                ));
+            }
+            connection.execute(
+                "UPDATE cache_entries SET hit_count=hit_count+1 WHERE identity_digest=?1",
+                [&digest],
+            )?;
             entry.hit_count = entry.hit_count.saturating_add(1);
             return Ok(CacheLookup::Hit(Box::new(entry)));
         }
@@ -2654,6 +2993,21 @@ impl RuntimeStore {
     }
 
     pub fn publish(&self, entry: &NeedCacheEntry) -> Result<(), StoreError> {
+        let Some(provenance) = entry.identity.role_profile_provenance.as_ref() else {
+            return Err(StoreError::ArtifactIdentity(
+                "cannot publish cache entry without role-profile provenance".to_owned(),
+            ));
+        };
+        if entry.worker_outcome.role_profile_provenance.as_ref() != Some(provenance) {
+            return Err(StoreError::ArtifactIdentity(
+                "cache identity and worker outcome role-profile provenance differ".to_owned(),
+            ));
+        }
+        if !self.role_profile_provenance_is_historical(provenance)? {
+            return Err(StoreError::ArtifactIdentity(
+                "cache entry references an unknown role-profile revision".to_owned(),
+            ));
+        }
         let connection = self.connection()?;
         connection.execute(
             "INSERT OR REPLACE INTO cache_entries(identity_digest, logical_digest, source_digest, entry_json, created_unix_ms, hit_count)
@@ -3852,13 +4206,33 @@ impl RuntimeStore {
 
     pub fn record_worker_run(&self, entry: &NeedCacheEntry) -> Result<(), StoreError> {
         let outcome = &entry.worker_outcome;
+        let provenance = match (
+            entry.identity.role_profile_provenance.as_ref(),
+            outcome.role_profile_provenance.as_ref(),
+        ) {
+            (Some(identity), Some(outcome)) if identity == outcome => {
+                if !self.role_profile_provenance_is_historical(identity)? {
+                    return Err(StoreError::ArtifactIdentity(
+                        "worker run references an unknown role-profile revision".to_owned(),
+                    ));
+                }
+                Some(identity)
+            }
+            (None, None) => None,
+            _ => {
+                return Err(StoreError::ArtifactIdentity(
+                    "worker run identity and outcome role-profile provenance differ".to_owned(),
+                ));
+            }
+        };
         let connection = self.connection()?;
         connection.execute(
             "INSERT INTO worker_runs(identity_digest, model, reasoning, status, duration_ms,
              input_tokens, cached_input_tokens, output_tokens, result_digest, created_unix_ms,
              failure_code, failure_diagnostic, discarded_facts, logical_worker_spawns,
-             worker_turns, repair_performed, worker_session_id, session_cleanup_success)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?12, ?13, ?14, ?15, ?16)",
+             worker_turns, repair_performed, worker_session_id, session_cleanup_success,
+             role_profile_id, role_profile_revision, role_profile_definition_digest)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 entry.identity.digest().to_string(),
                 outcome.worker_model,
@@ -3876,6 +4250,11 @@ impl RuntimeStore {
                 outcome.repair_performed,
                 outcome.worker_session_id,
                 outcome.session_cleanup_success,
+                provenance.map(|value| value.profile_id.as_str()),
+                provenance.map(|value| value.revision),
+                provenance
+                    .as_ref()
+                    .map(|value| value.definition_digest.to_string()),
             ],
         )?;
         Ok(())
@@ -3887,13 +4266,33 @@ impl RuntimeStore {
         config: &WorkerConfig,
         failure: &WorkerFailure,
     ) -> Result<(), StoreError> {
+        let provenance = match (
+            config.role_profile_provenance.as_ref(),
+            failure.role_profile_provenance.as_ref(),
+        ) {
+            (Some(config), Some(failure)) if config == failure => {
+                if !self.role_profile_provenance_is_historical(config)? {
+                    return Err(StoreError::ArtifactIdentity(
+                        "worker failure references an unknown role-profile revision".to_owned(),
+                    ));
+                }
+                Some(config)
+            }
+            (None, None) => None,
+            _ => {
+                return Err(StoreError::ArtifactIdentity(
+                    "worker config and failure role-profile provenance differ".to_owned(),
+                ));
+            }
+        };
         let connection = self.connection()?;
         connection.execute(
             "INSERT INTO worker_runs(identity_digest, model, reasoning, status, duration_ms,
              input_tokens, cached_input_tokens, output_tokens, result_digest, created_unix_ms,
              failure_code, failure_diagnostic, discarded_facts, logical_worker_spawns,
-             worker_turns, repair_performed, worker_session_id, session_cleanup_success)
-             VALUES(?1, ?2, ?3, 'failed', ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             worker_turns, repair_performed, worker_session_id, session_cleanup_success,
+             role_profile_id, role_profile_revision, role_profile_definition_digest)
+             VALUES(?1, ?2, ?3, 'failed', ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 identity.to_string(),
                 config.model,
@@ -3911,6 +4310,9 @@ impl RuntimeStore {
                 failure.repair_performed,
                 failure.worker_session_id,
                 failure.session_cleanup_success,
+                provenance.map(|value| value.profile_id.as_str()),
+                provenance.map(|value| value.revision),
+                provenance.map(|value| value.definition_digest.to_string()),
             ],
         )?;
         Ok(())
@@ -3940,6 +4342,7 @@ impl RuntimeStore {
                 discarded_facts: outcome.discarded_facts,
                 worker_session_id: outcome.worker_session_id.clone(),
                 session_cleanup_success: outcome.session_cleanup_success,
+                role_profile_provenance: outcome.role_profile_provenance.clone(),
             },
         )
     }
@@ -4051,7 +4454,8 @@ impl RuntimeStore {
             .query_row(
                 "SELECT input_tokens, cached_input_tokens, output_tokens, result_digest,
                  failure_code, failure_diagnostic, discarded_facts, logical_worker_spawns,
-                 worker_turns, repair_performed, worker_session_id, session_cleanup_success
+                 worker_turns, repair_performed, worker_session_id, session_cleanup_success,
+                 role_profile_id, role_profile_revision, role_profile_definition_digest
                  FROM worker_runs ORDER BY id DESC LIMIT 1",
                 [],
                 |row| {
@@ -4068,6 +4472,9 @@ impl RuntimeStore {
                         row.get::<_, bool>(9)?,
                         row.get::<_, Option<String>>(10)?,
                         row.get::<_, Option<bool>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<u64>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
                     ))
                 },
             )
@@ -4087,7 +4494,15 @@ impl RuntimeStore {
                     repair_performed,
                     worker_session_id,
                     session_cleanup_success,
+                    role_profile_id,
+                    role_profile_revision,
+                    role_profile_definition_digest,
                 )| {
+                    let role_profile_provenance = parse_role_profile_provenance((
+                        role_profile_id,
+                        role_profile_revision,
+                        role_profile_definition_digest,
+                    ))?;
                     Ok(WorkerRunRecord {
                         input_tokens,
                         cached_input_tokens,
@@ -4101,6 +4516,7 @@ impl RuntimeStore {
                         repair_performed,
                         worker_session_id,
                         session_cleanup_success,
+                        role_profile_provenance,
                     })
                 },
             )
@@ -4115,7 +4531,8 @@ impl RuntimeStore {
         let mut statement = connection.prepare(
             "SELECT input_tokens, cached_input_tokens, output_tokens, result_digest,
              failure_code, failure_diagnostic, discarded_facts, logical_worker_spawns,
-             worker_turns, repair_performed, worker_session_id, session_cleanup_success
+             worker_turns, repair_performed, worker_session_id, session_cleanup_success,
+             role_profile_id, role_profile_revision, role_profile_definition_digest
              FROM worker_runs ORDER BY id LIMIT -1 OFFSET ?1",
         )?;
         let rows = statement.query_map([previous_count], |row| {
@@ -4132,6 +4549,9 @@ impl RuntimeStore {
                 row.get::<_, bool>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<bool>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<u64>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })?;
         rows.map(|row| {
@@ -4148,7 +4568,15 @@ impl RuntimeStore {
                 repair_performed,
                 worker_session_id,
                 session_cleanup_success,
+                role_profile_id,
+                role_profile_revision,
+                role_profile_definition_digest,
             ) = row?;
+            let role_profile_provenance = parse_role_profile_provenance((
+                role_profile_id,
+                role_profile_revision,
+                role_profile_definition_digest,
+            ))?;
             Ok(WorkerRunRecord {
                 input_tokens,
                 cached_input_tokens,
@@ -4162,6 +4590,7 @@ impl RuntimeStore {
                 repair_performed,
                 worker_session_id,
                 session_cleanup_success,
+                role_profile_provenance,
             })
         })
         .collect()
@@ -4337,6 +4766,27 @@ impl RuntimeStore {
 
 fn parse_digest(value: &str) -> Result<Digest, StoreError> {
     Digest::parse(value).map_err(|error| StoreError::Digest(error.to_string()))
+}
+
+fn parse_role_profile_provenance(
+    value: (Option<String>, Option<u64>, Option<String>),
+) -> Result<Option<RoleProfileProvenance>, StoreError> {
+    let (profile_id, revision, digest) = value;
+    match (profile_id, revision, digest) {
+        (None, None, None) => Ok(None),
+        (Some(profile_id), Some(revision), Some(digest)) => {
+            let profile_id = RoleProfileId::new(profile_id)
+                .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+            let digest = Digest::parse(&digest)
+                .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))?;
+            RoleProfileProvenance::new(profile_id, revision, digest)
+                .map(Some)
+                .map_err(|error| StoreError::RoleProfileCorruption(error.to_string()))
+        }
+        _ => Err(StoreError::RoleProfileCorruption(
+            "role-profile provenance columns are partially populated".to_owned(),
+        )),
+    }
 }
 
 fn apply_migration(
@@ -4727,7 +5177,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         let columns = connection
             .prepare("PRAGMA table_info(worker_runs)")
             .unwrap()
@@ -5043,6 +5493,7 @@ mod tests {
             service_tier: None,
             timeout_seconds: 180,
             evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+            role_profile_provenance: None,
         };
         let mut repaired = base.clone();
         repaired.evidence_failure_policy = EvidenceFailurePolicy::RepairOnce;
@@ -5092,6 +5543,7 @@ mod tests {
             service_tier: None,
             timeout_seconds: 180,
             evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+            role_profile_provenance: None,
         };
         store
             .record_worker_failure(
@@ -5110,6 +5562,7 @@ mod tests {
                     discarded_facts: 3,
                     worker_session_id: Some("session-1".to_owned()),
                     session_cleanup_success: Some(false),
+                    role_profile_provenance: None,
                 },
             )
             .unwrap();
@@ -5130,6 +5583,7 @@ mod tests {
                     discarded_facts: 3,
                     worker_session_id: Some("session-2".to_owned()),
                     session_cleanup_success: None,
+                    role_profile_provenance: None,
                 },
             )
             .unwrap();

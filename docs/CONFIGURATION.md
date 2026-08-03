@@ -44,8 +44,8 @@ Credentials are neither imported nor exported.
 
 Worker execution and orchestration currently use Codex only. The web control
 plane can edit Codex model policy, runtime bounds, and canonical named role
-profiles; role-profile changes remain configuration-only and do not bind a
-worker or session.
+profiles. The HTTP/editor changes configuration only; the product hook and MCP
+entry points bind an explicitly selected active revision to each new session.
 
 The planned sequence is Codex-first role configuration and lifecycle
 orchestration, followed by configuration-only interoperability for Claude Code
@@ -90,13 +90,22 @@ projects to the existing `WorkerProfile` representation with `None`, while
 distinct from the role-profile definition/revision digest. Projection is
 explicit and does not read or modify `ModelPolicy`.
 
-The domain and SQLite migration remain an offline configuration boundary. The
-local HTTP/editor exposes bounded, authenticated routes for list/detail/history,
-audit, request-time preflight, draft CAS, and explicit activation/deactivation.
-Preflight is recomputed at request time and is never persisted. No endpoint
-launches a worker, binds a session, executes a lifecycle, or configures a
-non-Codex host. Role profiles never carry credentials, host paths, raw
-transcripts, or network access.
+Role-profile definitions and revisions remain local SQLite state. New
+production sessions bind an explicitly selected active revision; the binding
+stores only profile ID, revision, and definition digest. Historical sessions
+reload that exact revision even after a later activation. Legacy rows remain
+unknown and cannot be reused for profile-dependent cache or worker execution.
+The local HTTP/editor exposes bounded, authenticated routes for
+list/detail/history, audit, request-time preflight, draft CAS, and explicit
+activation/deactivation. Preflight is recomputed at request time and is never
+persisted. These endpoints do not launch workers, bind sessions, execute a
+lifecycle, or configure a non-Codex host. Role profiles never carry
+credentials, host paths, raw transcripts, or network access.
+
+The product hook selects a profile with `NEEDLE_ROLE_PROFILE_ID`. If that
+variable is missing or invalid, the hook remains fail-open but records no
+session row, so the runtime cannot silently attribute the session to a current
+active revision. MCP uses the required `--role-profile <id>` selector.
 
 ## Export and import
 

@@ -51,6 +51,7 @@ pub(super) fn run_supervised_main(
         service_tier: Some(context.service_tier.to_owned()),
         timeout_seconds: context.timeout.as_secs(),
         evidence_failure_policy: EvidenceFailurePolicy::DiscardInvalidFact,
+        role_profile_provenance: None,
     };
     let session_store = RuntimeStore::new(context.product_data.join("needle.sqlite3"));
     let mut session = CodexMainSession::start_pilot(MainSessionConfig {
@@ -69,11 +70,12 @@ pub(super) fn run_supervised_main(
     let session_id = session.thread_id().to_owned();
     context
         .store
-        .record_session_start(
+        .record_session_start_profiled(
             &session_id,
             context.prompt_profile_digest,
             Some(context.main_model),
             context.repository.to_str(),
+            context.role_profile_id,
         )
         .map_err(|error| error.to_string())?;
 

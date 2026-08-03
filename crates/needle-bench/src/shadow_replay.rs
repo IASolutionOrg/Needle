@@ -288,7 +288,7 @@ mod tests {
         Digest, EvidenceFailurePolicy, NeedCacheEntry, NeedCacheIdentity, NeedKey, NeedResult,
         WorkerArtifactResult, WorkerObservationTrace, WorkerOutcome,
     };
-    use needle_runtime::RuntimeSettings;
+    use needle_runtime::{RuntimeSettings, StoreError};
     use std::collections::BTreeMap;
 
     #[test]
@@ -325,6 +325,7 @@ mod tests {
             normalized_request_digest: Digest::blake3(b"request"),
             worker_configuration_digest: Digest::blake3(b"worker"),
             output_schema_digest: Digest::blake3(b"schema"),
+            role_profile_provenance: None,
         };
         let result = NeedResult {
             complete: true,
@@ -365,11 +366,12 @@ mod tests {
                 discarded_facts: 0,
                 worker_session_id: None,
                 session_cleanup_success: Some(true),
+                role_profile_provenance: None,
             },
             created_unix_ms: 1,
             hit_count: 0,
         };
-        store.publish(&entry).unwrap();
+        assert!(matches!(store.publish(&entry), Err(StoreError::ArtifactIdentity(_))));
         fs::write(root.join("report.json"), "{}").unwrap();
 
         let report = run_shadow_replay(

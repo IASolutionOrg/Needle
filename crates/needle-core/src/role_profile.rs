@@ -1,5 +1,6 @@
 use crate::{
-    CanonicalHasher, Digest, HARD_MAX_NEEDS_PER_TASK, HARD_RESULT_TOKENS, NeedKey, WorkerProfile,
+    CanonicalHasher, Digest, EvidenceFailurePolicy, HARD_MAX_NEEDS_PER_TASK, HARD_RESULT_TOKENS,
+    NeedKey, WorkerConfig, WorkerProfile,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -615,10 +616,86 @@ pub struct RoleProfileRevision {
     pub activated_unix_ms: Option<u64>,
 }
 
+/// The bounded, immutable identity of the role-profile revision used by a
+/// session. This intentionally carries no executable, model prompt, policy,
+/// or other host-local configuration.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProfileProvenance {
+    pub profile_id: RoleProfileId,
+    pub revision: u64,
+    pub definition_digest: Digest,
+}
+
+/// Compatibility spelling used by persistence and runtime APIs.
+pub type RoleProfileBinding = RoleProfileProvenance;
+
+impl RoleProfileProvenance {
+    pub fn new(
+        profile_id: RoleProfileId,
+        revision: u64,
+        definition_digest: Digest,
+    ) -> Result<Self, RoleProfileValidationError> {
+        let provenance = Self { profile_id, revision, definition_digest };
+        provenance.validate()?;
+        Ok(provenance)
+    }
+
+    pub fn from_revision(
+        revision: &RoleProfileRevision,
+    ) -> Result<Self, RoleProfileValidationError> {
+        revision.validate()?;
+        Self::new(
+            revision.profile_id.clone(),
+            revision.revision,
+            revision.definition.definition_digest,
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RoleProfileValidationError> {
+        if self.revision == 0 {
+            return Err(RoleProfileValidationError::Revision);
+        }
+        // RoleProfileId is private-field validated by its constructor and
+        // Deserialize implementation. Calling new here also protects values
+        // assembled by direct struct literals in persistence code.
+        RoleProfileId::new(self.profile_id.as_str().to_owned())
+            .map_err(|_| RoleProfileValidationError::IdentityMismatch)?;
+        Ok(())
+    }
+}
+
 impl RoleProfileRevision {
     pub fn to_worker_profile(&self) -> Result<WorkerProfile, RoleProfileValidationError> {
         self.validate()?;
         self.definition.to_worker_profile()
+    }
+
+    /// Deterministically project this frozen historical revision to the
+    /// existing Codex worker boundary. The executable is host-local input and
+    /// therefore deliberately supplied by the parent rather than persisted in
+    /// the role profile.
+    pub fn to_worker_config(
+        &self,
+        executable: impl Into<String>,
+    ) -> Result<WorkerConfig, RoleProfileValidationError> {
+        self.validate()?;
+        let provenance = RoleProfileProvenance::from_revision(self)?;
+        Ok(WorkerConfig {
+            executable: executable.into(),
+            model: self.definition.model.clone(),
+            reasoning: self.definition.reasoning.as_str().to_owned(),
+            service_tier: match self.definition.service_tier {
+                ServiceTier::Default => None,
+                ServiceTier::Priority => Some("priority".to_owned()),
+            },
+            timeout_seconds: self.definition.timeout_seconds,
+            evidence_failure_policy: match self.definition.repair_policy {
+                RepairPolicy::None => EvidenceFailurePolicy::DiscardInvalidFact,
+                RepairPolicy::Once => EvidenceFailurePolicy::RepairOnce,
+            },
+            role_profile_provenance: Some(provenance),
+        })
     }
 
     pub fn validate(&self) -> Result<(), RoleProfileValidationError> {
