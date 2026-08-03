@@ -11,6 +11,7 @@ mod change;
 pub mod claim;
 mod domain;
 mod multi_need;
+mod role_profile;
 mod semantic;
 
 pub use approval::*;
@@ -24,6 +25,7 @@ pub use claim::{
 };
 pub use domain::*;
 pub use multi_need::*;
+pub use role_profile::*;
 pub use semantic::*;
 
 pub const FORMAT_REVISION: u32 = 1;

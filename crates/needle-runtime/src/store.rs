@@ -25,8 +25,13 @@ use thiserror::Error;
 mod changes;
 #[path = "store/claims.rs"]
 mod claims;
+#[path = "store/role_profiles.rs"]
+mod role_profiles;
 
 pub use changes::{ChangeAttemptRecord, PatchFileBlob, PreparedChangeRecord};
+pub use role_profiles::{
+    RoleProfileAuditOperation, RoleProfileAuditRecord, RoleProfileStateRecord,
+};
 
 pub struct NeedShadowWrite<'a> {
     pub session_id: &'a str,
@@ -709,6 +714,83 @@ CREATE TABLE change_applies (
 CREATE INDEX change_applies_change ON change_applies(change_id, created_unix_ms DESC);
 "#;
 
+const MIGRATION_V14: &str = r#"
+CREATE TABLE role_profiles (
+    profile_id TEXT NOT NULL PRIMARY KEY CHECK(length(profile_id) BETWEEN 1 AND 64),
+    role TEXT NOT NULL CHECK(role IN ('explorer','implementer','test_runner','reviewer','verifier','auditor')),
+    created_unix_ms INTEGER NOT NULL CHECK(created_unix_ms >= 0)
+);
+CREATE TABLE role_profile_revisions (
+    profile_id TEXT NOT NULL REFERENCES role_profiles(profile_id),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    definition_digest TEXT NOT NULL CHECK(length(definition_digest) = 67),
+    definition_json TEXT NOT NULL CHECK(length(definition_json) <= 32768),
+    created_unix_ms INTEGER NOT NULL CHECK(created_unix_ms >= 0),
+    activated_unix_ms INTEGER CHECK(activated_unix_ms IS NULL OR activated_unix_ms >= 0),
+    PRIMARY KEY(profile_id, revision),
+    UNIQUE(definition_digest),
+    UNIQUE(profile_id, definition_digest)
+);
+CREATE INDEX role_profile_revisions_digest ON role_profile_revisions(definition_digest);
+CREATE INDEX role_profile_revisions_history ON role_profile_revisions(profile_id, revision DESC);
+CREATE TABLE role_profile_state (
+    profile_id TEXT NOT NULL PRIMARY KEY REFERENCES role_profiles(profile_id),
+    latest_revision INTEGER NOT NULL CHECK(latest_revision > 0),
+    active_revision INTEGER CHECK(active_revision IS NULL OR active_revision > 0),
+    state_generation INTEGER NOT NULL CHECK(state_generation >= 0),
+    updated_unix_ms INTEGER NOT NULL CHECK(updated_unix_ms >= 0),
+    FOREIGN KEY(profile_id, latest_revision)
+        REFERENCES role_profile_revisions(profile_id, revision),
+    FOREIGN KEY(profile_id, active_revision)
+        REFERENCES role_profile_revisions(profile_id, revision)
+);
+CREATE INDEX role_profile_state_active ON role_profile_state(active_revision);
+CREATE TABLE role_profile_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL REFERENCES role_profiles(profile_id),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    definition_digest TEXT NOT NULL CHECK(length(definition_digest) = 67),
+    operation TEXT NOT NULL CHECK(operation IN ('create','revise','activate','deactivate')),
+    prior_state TEXT CHECK(prior_state IS NULL OR prior_state IN ('draft','active','inactive')),
+    resulting_state TEXT NOT NULL CHECK(resulting_state IN ('draft','active','inactive')),
+    prior_state_digest TEXT CHECK(prior_state_digest IS NULL OR length(prior_state_digest) = 67),
+    resulting_state_digest TEXT NOT NULL CHECK(length(resulting_state_digest) = 67),
+    prior_active_revision INTEGER CHECK(prior_active_revision IS NULL OR prior_active_revision > 0),
+    prior_active_digest TEXT CHECK(prior_active_digest IS NULL OR length(prior_active_digest) = 67),
+    resulting_active_revision INTEGER CHECK(resulting_active_revision IS NULL OR resulting_active_revision > 0),
+    resulting_active_digest TEXT CHECK(resulting_active_digest IS NULL OR length(resulting_active_digest) = 67),
+    created_unix_ms INTEGER NOT NULL CHECK(created_unix_ms >= 0)
+);
+CREATE INDEX role_profile_audit_profile ON role_profile_audit(profile_id, audit_id DESC);
+CREATE INDEX role_profile_audit_digest ON role_profile_audit(definition_digest, audit_id DESC);
+CREATE TRIGGER role_profile_revisions_immutable
+BEFORE UPDATE OF profile_id, revision, definition_digest, definition_json, created_unix_ms
+ON role_profile_revisions
+WHEN NEW.profile_id <> OLD.profile_id
+  OR NEW.revision <> OLD.revision
+  OR NEW.definition_digest <> OLD.definition_digest
+  OR NEW.definition_json <> OLD.definition_json
+  OR NEW.created_unix_ms <> OLD.created_unix_ms
+BEGIN
+    SELECT RAISE(ABORT, 'role profile revision identity is immutable');
+END;
+CREATE TRIGGER role_profile_revisions_no_delete
+BEFORE DELETE ON role_profile_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'role profile revision history is immutable');
+END;
+CREATE TRIGGER role_profile_audit_append_only
+BEFORE UPDATE ON role_profile_audit
+BEGIN
+    SELECT RAISE(ABORT, 'role profile audit is append-only');
+END;
+CREATE TRIGGER role_profile_audit_no_delete
+BEFORE DELETE ON role_profile_audit
+BEGIN
+    SELECT RAISE(ABORT, 'role profile audit is append-only');
+END;
+"#;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database operation failed: {0}")]
@@ -745,6 +827,14 @@ pub enum StoreError {
     ChangeConflict(String),
     #[error("patch artifact is invalid: {0}")]
     PatchArtifact(String),
+    #[error("role profile validation failed: {0}")]
+    RoleProfileValidation(String),
+    #[error("role profile storage is corrupt: {0}")]
+    RoleProfileCorruption(String),
+    #[error("role profile operation conflicts: {0}")]
+    RoleProfileConflict(String),
+    #[error("role profile was not found: {0}")]
+    RoleProfileNotFound(String),
     #[error("database connection lock was poisoned")]
     ConnectionLock,
 }
@@ -1063,6 +1153,7 @@ impl RuntimeStore {
         apply_migration(&mut connection, 11, MIGRATION_V11)?;
         apply_migration(&mut connection, 12, MIGRATION_V12)?;
         apply_migration(&mut connection, 13, MIGRATION_V13)?;
+        apply_migration(&mut connection, 14, MIGRATION_V14)?;
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('utility_gate_passed', '0')",
             [],
@@ -4636,7 +4727,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         let columns = connection
             .prepare("PRAGMA table_info(worker_runs)")
             .unwrap()
