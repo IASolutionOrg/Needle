@@ -38,6 +38,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import RoleProfilesEditor from "@/pages/role-profiles-editor"
 
 const resources = {
   platforms: {
@@ -236,10 +237,13 @@ export default function ResourcePage() {
           </Table>
         </section>
       ) : resource === "models" ? (
-        <ModelPolicyPanel
-          key={control.data?.model_policy_digest ?? "model-policy"}
-          control={control.data ?? null}
-        />
+        <div className="grid gap-5">
+          <ModelPolicyPanel
+            key={control.data?.model_policy_digest ?? "model-policy"}
+            control={control.data ?? null}
+          />
+          <RoleProfilesEditor />
+        </div>
       ) : resource === "artifacts" ? (
         <section className="border bg-panel">
           <div className="border-b px-4 py-3 text-sm font-semibold">
