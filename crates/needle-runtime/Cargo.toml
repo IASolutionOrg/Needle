@@ -1,0 +1,16 @@
+[package]
+name = "needle-runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+arrayvec.workspace = true
+blake3.workspace = true
+needle-core = { path = "../needle-core" }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

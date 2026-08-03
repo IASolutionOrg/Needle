@@ -1,0 +1,29 @@
+{
+  "tasks": [
+    {
+      "id": "ripgrep-14.1.1-locate-glob-case-insensitive",
+      "route": "locate.implementation",
+      "prompt": "Locate the implementation of ripgrep's `--glob-case-insensitive` option. Identify the exact files and symbols that define the flag, apply it to glob overrides, and test the behavior. Do not modify the repository.",
+      "quality_oracle": {
+        "required_files": [
+          "crates/core/flags/defs.rs",
+          "crates/core/flags/hiargs.rs",
+          "tests/misc.rs"
+        ],
+        "required_symbols": [
+          "GlobCaseInsensitive",
+          "globs",
+          "glob_always_case_insensitive"
+        ],
+        "required_claims": [
+          "--glob-case-insensitive",
+          "case_insensitive"
+        ],
+        "forbidden_claims": [
+          "cargo test --test integration misc::glob_case_insensitive -- --exact"
+        ],
+        "focused_test_command": "cargo test --test integration misc::glob_always_case_insensitive -- --exact"
+      }
+    }
+  ]
+}

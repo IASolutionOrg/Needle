@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}
+{"type":"item.error","item":{"type":"mcp_tool_call","name":"need_context","error":{"message":"need_context tool failed"}}}
+{"type":"turn.failed","error":{"message":"failed"}}

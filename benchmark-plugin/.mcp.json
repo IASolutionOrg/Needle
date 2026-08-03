@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "needle-benchmark": {
+      "enabled": false,
+      "command": "${PLUGIN_ROOT}/bin/needle",
+      "args": ["mcp", "serve-benchmark"]
+    }
+  }
+}

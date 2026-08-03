@@ -1,0 +1,45 @@
+{
+  "schema": "needle.benchmark-oracle/1",
+  "task_id": "ripgrep-no-ignore-vcs-locate-holdout",
+  "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+  "evidence": [
+    {
+      "role": "primary",
+      "path": "crates/core/flags/defs.rs",
+      "needles": [
+        "struct NoIgnoreVcs;",
+        "args.no_ignore_vcs = v.unwrap_switch();"
+      ]
+    },
+    {
+      "role": "supporting",
+      "path": "crates/core/flags/hiargs.rs",
+      "needles": [
+        ".git_global(!self.no_ignore_vcs && !self.no_ignore_global)",
+        ".git_ignore(!self.no_ignore_vcs)",
+        ".git_exclude(!self.no_ignore_vcs && !self.no_ignore_exclude)"
+      ]
+    },
+    {
+      "role": "test",
+      "path": "tests/feature.rs",
+      "needles": [
+        "rgtest!(f68_no_ignore_vcs",
+        "cmd.arg(\"--no-ignore-vcs\").arg(\"test\").stdout()"
+      ]
+    }
+  ],
+  "focused_test": {
+    "identifier": "feature::f68_no_ignore_vcs",
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--test",
+      "integration",
+      "feature::f68_no_ignore_vcs",
+      "--",
+      "--exact"
+    ]
+  }
+}

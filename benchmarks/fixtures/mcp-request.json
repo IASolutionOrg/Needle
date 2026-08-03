@@ -1,0 +1,33 @@
+{
+  "route": "trace.state-flow",
+  "subject": {
+    "kind": "cli_option",
+    "name": "--crlf"
+  },
+  "required": [
+    {
+      "kind": "implementation_location",
+      "polarity": "positive",
+      "selection": "primary"
+    },
+    {
+      "kind": "runtime_flow",
+      "scenario": "default",
+      "completeness": "contract_complete",
+      "granularity": "stepwise"
+    },
+    {
+      "kind": "focused_tests",
+      "polarity": "positive",
+      "selection": "representative",
+      "completeness": "open_world"
+    }
+  ],
+  "preferred": [],
+  "world": {
+    "source": "current",
+    "platform": "current",
+    "features": "default"
+  },
+  "task": "Trace how --crlf changes matching and search line terminators from CLI parsing through runtime configuration, and identify a focused test proving the default scenario."
+}

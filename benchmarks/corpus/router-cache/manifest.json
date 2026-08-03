@@ -1,0 +1,106 @@
+{
+  "schema": "needle.frozen-corpus/3",
+  "frozen_unix_ms": 1785412789576,
+  "arms": [
+    "frontier_direct",
+    "native_subagent",
+    "needle_miss",
+    "exact_hit",
+    "partial_hit",
+    "escalation",
+    "irrelevant_mutation",
+    "relevant_mutation"
+  ],
+  "cost_model_path": "cost-model.json",
+  "cost_model_digest": "b3:a517364a8e5cdf1af49ea728c150c2bd2cff13503888175bf5da2471cfe8a74a",
+  "next_pilot_path": "minimal-live-pilot.json",
+  "next_pilot_digest": "b3:18a434227eb9abf2381eb0a65348f0dba66301ccba7dbdeb57c7933b078180cb",
+  "campaign_path": "campaign.json",
+  "campaign_digest": "b3:207fb6ef4a29606c76054b3dcd27641cb10ae114c35501b7b798fb46e7c1a597",
+  "tasks": [
+    {
+      "id": "ripgrep-glob-case-insensitive-locate-calibration",
+      "route": "locate_implementation",
+      "split": "calibration",
+      "repository_url": "https://github.com/BurntSushi/ripgrep.git",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "prompt": "Where is ripgrep's --glob-case-insensitive option implemented, and which focused test demonstrates its behavior? Give the primary location and only the supporting evidence needed to continue.",
+      "oracle_path": "oracles/ripgrep-glob-case-insensitive-locate.json",
+      "oracle_digest": "b3:efc9f2b932008a42393bad9145d1db1dc420bade8778889d7fcf83d6c9734b7f",
+      "test_identifier": "misc::glob_always_case_insensitive",
+      "focused_command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--test",
+        "integration",
+        "misc::glob_always_case_insensitive",
+        "--",
+        "--exact"
+      ]
+    },
+    {
+      "id": "ripgrep-crlf-trace-calibration",
+      "route": "trace_state_flow",
+      "split": "calibration",
+      "repository_url": "https://github.com/BurntSushi/ripgrep.git",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "prompt": "Trace how ripgrep's --crlf option changes matching and search line terminators, and name a focused test that proves the default scenario.",
+      "oracle_path": "oracles/ripgrep-crlf-trace.json",
+      "oracle_digest": "b3:db68c75eebfab64593825a1563facc1e67634ad15e32dcccbd23c83d655b5059",
+      "test_identifier": "feature::f416_crlf",
+      "focused_command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--test",
+        "integration",
+        "feature::f416_crlf",
+        "--",
+        "--exact"
+      ]
+    },
+    {
+      "id": "ripgrep-no-ignore-vcs-locate-holdout",
+      "route": "locate_implementation",
+      "split": "holdout",
+      "repository_url": "https://github.com/BurntSushi/ripgrep.git",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "prompt": "Find the implementation that makes ripgrep's --no-ignore-vcs option stop applying Git ignore rules, and identify a focused test for that behavior.",
+      "oracle_path": "oracles/ripgrep-no-ignore-vcs-locate.json",
+      "oracle_digest": "b3:4eac2f4e630f8a457de9bcfa1cfdd3adef60fd46e399d24ac7479c2b1906398d",
+      "test_identifier": "feature::f68_no_ignore_vcs",
+      "focused_command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--test",
+        "integration",
+        "feature::f68_no_ignore_vcs",
+        "--",
+        "--exact"
+      ]
+    },
+    {
+      "id": "ripgrep-null-data-trace-holdout",
+      "route": "trace_state_flow",
+      "split": "holdout",
+      "repository_url": "https://github.com/BurntSushi/ripgrep.git",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "prompt": "Trace how ripgrep's --null-data option changes matching and searching from newline-delimited input to NUL-delimited input, with a focused test for the behavior.",
+      "oracle_path": "oracles/ripgrep-null-data-trace.json",
+      "oracle_digest": "b3:e8efb461add472614a36eb920a0c0aa1857e13fe4834aa12cc2582d9e8df4661",
+      "test_identifier": "feature::f993_null_data",
+      "focused_command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--test",
+        "integration",
+        "feature::f993_null_data",
+        "--",
+        "--exact"
+      ]
+    }
+  ]
+}

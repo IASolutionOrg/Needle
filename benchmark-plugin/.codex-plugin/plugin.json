@@ -1,0 +1,7 @@
+{
+  "name": "needle-benchmark",
+  "version": "0.1.0",
+  "description": "Optional Needle Phase 0A MCP transport control for benchmark use only.",
+  "author": { "name": "Needle contributors" },
+  "mcpServers": "./.mcp.json"
+}

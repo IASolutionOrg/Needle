@@ -1,0 +1,118 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: "Geist Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-panel: var(--panel);
+  --color-link: var(--link);
+  --color-pending: var(--pending);
+  --color-success: var(--success);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.2);
+}
+
+:root,
+.dark {
+  color-scheme: dark;
+  --background: #0b0d0f;
+  --foreground: #f4f4f1;
+  --card: #111417;
+  --card-foreground: #f4f4f1;
+  --popover: #15191d;
+  --popover-foreground: #f4f4f1;
+  --primary: #f4f4f1;
+  --primary-foreground: #0b0d0f;
+  --secondary: #1a1e22;
+  --secondary-foreground: #e8e8e3;
+  --muted: #171b1f;
+  --muted-foreground: #8f979f;
+  --accent: #22272d;
+  --accent-foreground: #f4f4f1;
+  --destructive: #ef635d;
+  --border: #282e34;
+  --input: #313840;
+  --ring: #c9923e;
+  --panel: #111417;
+  --link: #65c7dc;
+  --pending: #e2a84f;
+  --success: #64c587;
+  --radius: 0.25rem;
+  --sidebar: #0e1113;
+  --sidebar-foreground: #b9bec3;
+  --sidebar-primary: #e2a84f;
+  --sidebar-primary-foreground: #0b0d0f;
+  --sidebar-accent: #1b2025;
+  --sidebar-accent-foreground: #f4f4f1;
+  --sidebar-border: #23292f;
+  --sidebar-ring: #c9923e;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply bg-background font-sans antialiased;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    min-width: 320px;
+    min-height: 100svh;
+  }
+
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--pending) 38%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

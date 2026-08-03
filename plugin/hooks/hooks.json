@@ -1,0 +1,79 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook session-start",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook session-start",
+            "timeout": 10,
+            "statusMessage": "Loading Needle routing profile"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook stop",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook stop",
+            "timeout": 240,
+            "statusMessage": "Preparing Needle evidence"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook user-prompt-submit",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook user-prompt-submit",
+            "timeout": 10,
+            "statusMessage": "Recording Needle task context"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook session-end",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook session-end",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook pre-compact",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook pre-compact",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/bin/needle hook post-compact",
+            "commandWindows": "${PLUGIN_ROOT}\\bin\\needle.exe hook post-compact",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

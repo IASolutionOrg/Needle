@@ -1,0 +1,45 @@
+{
+  "schema": "needle.benchmark-oracle/1",
+  "task_id": "ripgrep-glob-case-insensitive-locate-calibration",
+  "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+  "evidence": [
+    {
+      "role": "primary",
+      "path": "crates/core/flags/defs.rs",
+      "needles": [
+        "struct GlobCaseInsensitive;",
+        "args.glob_case_insensitive = v.unwrap_switch();"
+      ]
+    },
+    {
+      "role": "supporting",
+      "path": "crates/core/flags/hiargs.rs",
+      "needles": [
+        "fn globs(",
+        "if low.glob_case_insensitive {",
+        "builder.case_insensitive(true).unwrap();"
+      ]
+    },
+    {
+      "role": "test",
+      "path": "tests/misc.rs",
+      "needles": [
+        "rgtest!(glob_always_case_insensitive",
+        "\"--glob-case-insensitive\", \"--glob\", \"*.html\", \"Sherlock\""
+      ]
+    }
+  ],
+  "focused_test": {
+    "identifier": "misc::glob_always_case_insensitive",
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--test",
+      "integration",
+      "misc::glob_always_case_insensitive",
+      "--",
+      "--exact"
+    ]
+  }
+}

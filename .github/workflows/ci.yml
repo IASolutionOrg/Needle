@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+jobs:
+  frontend-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/needle-app/web/package-lock.json
+      - name: Cache Rust dependencies and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            ${{ runner.os }}-rust-
+      - name: Install web dependencies
+        working-directory: crates/needle-app/web
+        run: npm ci
+      - name: Verify web unit tests, lint and production bundle
+        working-directory: crates/needle-app/web
+        run: |
+          npm test
+          npm run lint
+          npm run build
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Upload web production bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: crates/needle-app/web/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  checks:
+    needs: frontend-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["windows-latest", "ubuntu-latest", "macos-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy
+      - name: Cache Rust dependencies and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            ${{ runner.os }}-rust-
+      - name: Download web production bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: crates/needle-app/web/dist
+      - uses: actions/setup-node@v7
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/needle-app/web/package-lock.json
+      - name: Install web dependencies
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/needle-app/web
+        run: npm ci
+      - name: Check Windows-specific lints
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo build --locked --workspace
+      - name: Cache Playwright browsers
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v6
+        with:
+          path: .cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('crates/needle-app/web/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright Chromium
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/needle-app/web
+        run: npx playwright install chromium
+      - name: Verify embedded control plane end to end
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/needle-app/web
+        run: npm run test:e2e:local
+      - run: cargo run --locked -p needle-app -- plugin package --output ci-plugin
+      - run: cargo run --locked -p needle-app -- plugin package --benchmark --output ci-benchmark-plugin

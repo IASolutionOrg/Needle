@@ -1,0 +1,15 @@
+{
+  "name": "needle",
+  "version": "0.1.0",
+  "description": "Snapshot-exact repository evidence routing for Codex.",
+  "author": { "name": "Needle contributors" },
+  "interface": {
+    "displayName": "Needle",
+    "shortDescription": "Read-only evidence briefs for repository tasks",
+    "longDescription": "Needle routes bounded context requests to an isolated read-only Codex worker and returns snapshot-exact evidence briefs through a Stop continuation.",
+    "developerName": "Needle contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": ["Use Needle evidence routes when repository context is missing."]
+  }
+}

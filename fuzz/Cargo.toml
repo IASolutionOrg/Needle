@@ -1,0 +1,21 @@
+[package]
+name = "needle-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+needle-core = { path = "../crates/needle-core" }
+
+[[bin]]
+name = "need_request"
+path = "fuzz_targets/need_request.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

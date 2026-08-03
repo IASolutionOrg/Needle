@@ -1,0 +1,45 @@
+{
+  "schema_id": "needle.artifact-result/2",
+  "artifacts": [
+    {
+      "kind": "code-location",
+      "locations": [
+        {
+          "role": "primary",
+          "path": "crates/core/flags/hiargs.rs",
+          "symbol": "globs",
+          "byte_start": null,
+          "byte_end": null
+        },
+        {
+          "role": "supporting",
+          "path": "crates/core/flags/defs.rs",
+          "symbol": "GlobCaseInsensitive::update",
+          "byte_start": null,
+          "byte_end": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "kind": "code-location",
+      "locations": [
+        {
+          "role": "primary",
+          "path": "tests/misc.rs",
+          "symbol": "glob_always_case_insensitive (line 358)",
+          "byte_start": null,
+          "byte_end": null
+        }
+      ],
+      "gaps": []
+    }
+  ],
+  "observation_trace": {
+    "observed_files": [],
+    "gaps": [
+      "unknown_command_action"
+    ]
+  },
+  "artifact_traces": {}
+}

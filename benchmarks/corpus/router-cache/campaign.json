@@ -1,0 +1,37 @@
+{
+  "schema": "needle.multi-task-campaign/1",
+  "task_ids": [
+    "ripgrep-glob-case-insensitive-locate-calibration",
+    "ripgrep-crlf-trace-calibration"
+  ],
+  "paid_arms": [
+    "frontier_direct",
+    "needle_miss"
+  ],
+  "offline_cache_arms": [
+    "exact_hit",
+    "partial_hit",
+    "irrelevant_mutation",
+    "relevant_mutation"
+  ],
+  "deferred_diagnostic_arms": [
+    "native_subagent",
+    "escalation"
+  ],
+  "repetitions_per_task": 1,
+  "automatic_retries": false,
+  "statistical_claim": false,
+  "bootstrap_resamples": 10000,
+  "one_sided_alpha_basis_points": 500,
+  "target_power_basis_points": 9000,
+  "budget_reserve": {
+    "main_turn_microcredits": 2633875,
+    "extra_main_turns_per_needle_observation": 2,
+    "worker_microcredits": 2034130,
+    "extra_workers_per_needle_observation": 0,
+    "evidence": [
+      "benchmarks/results/live/routing-and-cache-calibration.md",
+      "benchmarks/results/historical/cache-mutation-calibration.md"
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+@@need:key
+one
+@@end
+@@need:other
+two
+@@end

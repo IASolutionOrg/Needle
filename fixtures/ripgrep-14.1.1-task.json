@@ -1,0 +1,28 @@
+{
+  "tasks": [
+    {
+      "id": "ripgrep-14.1.1-glob-case-insensitive",
+      "prompt": "Explain how ripgrep's `--glob-case-insensitive` option works and where it is implemented. Do not modify the repository.",
+      "quality_oracle": {
+        "required_files": [
+          "crates/core/flags/defs.rs",
+          "crates/core/flags/hiargs.rs",
+          "tests/misc.rs"
+        ],
+        "required_symbols": [
+          "GlobCaseInsensitive",
+          "HiArgs::walk_builder",
+          "glob_always_case_insensitive"
+        ],
+        "required_claims": [
+          "--glob",
+          "--iglob"
+        ],
+        "forbidden_claims": [
+          "cargo test --test integration misc::glob_case_insensitive -- --exact"
+        ],
+        "focused_test_command": "cargo test --test integration misc::glob_always_case_insensitive -- --exact"
+      }
+    }
+  ]
+}

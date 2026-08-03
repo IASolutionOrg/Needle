@@ -1,0 +1,22 @@
+{
+  "schema": "needle.minimal-live-pilot/1",
+  "task_ids": [
+    "ripgrep-glob-case-insensitive-locate-calibration"
+  ],
+  "paid_arms": [
+    "needle_miss",
+    "exact_hit"
+  ],
+  "repetitions_per_task": 1,
+  "automatic_retries": false,
+  "statistical_claim": false,
+  "promotion_bootstrap": {
+    "route": "locate.implementation",
+    "capability": "implementation_location",
+    "reuse_cost_microcredits": 357425,
+    "evidence": [
+      "benchmarks/results/live/routing-and-cache-calibration.md"
+    ],
+    "replace_after_observed_hit": true
+  }
+}

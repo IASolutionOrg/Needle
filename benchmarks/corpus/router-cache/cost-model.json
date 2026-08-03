@@ -1,0 +1,77 @@
+{
+  "schema": "needle.campaign-cost-model/1",
+  "pricing_snapshot_digest": "b3:eca7f25b4a34dcf0f177601be1675bb97c16f24347d998dc9a2899e10b73cee9",
+  "unit": "microcredits",
+  "arm_estimates": [
+    {
+      "arm": "frontier_direct",
+      "microcredits_per_observation": 11158850,
+      "basis": "Maximum accepted historical frontier-direct calibration cost; retained as a conservative per-observation estimate.",
+      "evidence": [
+        "benchmarks/results/historical/routing-trace-calibration.md",
+        "benchmarks/results/historical/routing-location-calibration.md",
+        "benchmarks/results/live/routing-and-cache-calibration.md"
+      ]
+    },
+    {
+      "arm": "native_subagent",
+      "microcredits_per_observation": 13192980,
+      "basis": "Conservative proxy for a deferred diagnostic arm; no accepted native-subagent observation exists.",
+      "evidence": [
+        "benchmarks/results/historical/routing-trace-calibration.md",
+        "benchmarks/results/historical/cache-mutation-calibration.md"
+      ]
+    },
+    {
+      "arm": "needle_miss",
+      "microcredits_per_observation": 5311720,
+      "basis": "Maximum accepted complete Needle-miss calibration cost; retained as a conservative per-observation estimate.",
+      "evidence": [
+        "benchmarks/results/historical/cache-hit-calibration.md",
+        "benchmarks/results/live/routing-and-cache-calibration.md"
+      ]
+    },
+    {
+      "arm": "exact_hit",
+      "microcredits_per_observation": 357425,
+      "basis": "Accepted authoritative CoverageHit main cost with zero worker.",
+      "evidence": [
+        "benchmarks/results/live/routing-and-cache-calibration.md"
+      ]
+    },
+    {
+      "arm": "partial_hit",
+      "microcredits_per_observation": 3866985,
+      "basis": "Accepted historical relevant-mutation partial cost; current-path provider economics remain unmeasured and this arm stays offline-only.",
+      "evidence": [
+        "benchmarks/results/historical/cache-mutation-calibration.md"
+      ]
+    },
+    {
+      "arm": "escalation",
+      "microcredits_per_observation": 18504700,
+      "basis": "Conservative proxy for a deferred diagnostic arm; no accepted escalation observation exists.",
+      "evidence": [
+        "benchmarks/results/historical/cache-hit-calibration.md",
+        "benchmarks/results/historical/routing-trace-calibration.md",
+        "benchmarks/results/historical/cache-mutation-calibration.md"
+      ]
+    },
+    {
+      "arm": "irrelevant_mutation",
+      "microcredits_per_observation": 2813000,
+      "basis": "Accepted historical irrelevant-mutation cost; the current campaign treats this arm as offline cache validation.",
+      "evidence": [
+        "benchmarks/results/historical/cache-mutation-calibration.md"
+      ]
+    },
+    {
+      "arm": "relevant_mutation",
+      "microcredits_per_observation": 3866985,
+      "basis": "Accepted historical relevant-mutation partial cost; the current campaign treats this arm as offline cache validation.",
+      "evidence": [
+        "benchmarks/results/historical/cache-mutation-calibration.md"
+      ]
+    }
+  ]
+}

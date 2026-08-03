@@ -1,0 +1,21 @@
+Snapshot evidence for ripgrep 14.1.1 at commit
+4649aa9700619f94cf9c66876e9549d83420e16c:
+
+- crates/core/flags/defs.rs defines GlobCaseInsensitive. Its update method
+  stores the switch value in LowArgs.glob_case_insensitive, and
+  test_glob_case_insensitive verifies enable, disable, and last-flag-wins
+  parsing.
+- crates/core/flags/lowargs.rs carries glob_case_insensitive as a boolean next
+  to the ordinary glob collections.
+- crates/core/flags/hiargs.rs builds the override matcher in globs(). When
+  glob_case_insensitive is true, case-insensitive matching is enabled before
+  adding every --glob pattern. The builder then enables case-insensitive
+  matching before adding --iglob patterns regardless of the global switch.
+- HiArgs::walk_builder passes the resulting override matcher to
+  ignore::WalkBuilder::overrides, which applies it during traversal.
+- tests/misc.rs contains glob_always_case_insensitive, the end-to-end test for
+  --glob-case-insensitive. The nearby glob_case_insensitive test covers
+  --iglob instead. The focused integration command is:
+  cargo test --test integration misc::glob_always_case_insensitive -- --exact
+
+Check these claims against the snapshot before relying on them.

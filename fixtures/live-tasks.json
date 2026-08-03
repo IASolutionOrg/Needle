@@ -1,0 +1,8 @@
+{
+  "tasks": [
+    {
+      "id": "ripgrep-14.1.1-glob-case-insensitive",
+      "prompt": "Explain how ripgrep's `--glob-case-insensitive` option works and where it is implemented. Do not modify the repository."
+    }
+  ]
+}
