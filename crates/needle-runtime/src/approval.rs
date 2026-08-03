@@ -21,6 +21,9 @@ pub struct ApprovalContext {
     pub target_root: PathBuf,
     pub temp_root: PathBuf,
     pub test_plan: Option<TestPlan>,
+    /// Verifier-only ordered plans. Generic workers continue to use
+    /// `test_plan` and retain their historical two-execution budget.
+    pub verifier_test_plans: Option<Vec<TestPlan>>,
     pub test_execution_available: bool,
 }
 
@@ -49,6 +52,8 @@ pub struct ApprovalBroker {
     test_policies: Vec<TestCommandPolicy>,
     read_only_policies: Vec<ReadOnlyCommandPolicy>,
     executions: BTreeMap<String, u32>,
+    verifier_next_plan: usize,
+    verifier_in_flight: Option<Digest>,
 }
 
 impl ApprovalBroker {
@@ -57,6 +62,8 @@ impl ApprovalBroker {
             test_policies: policies,
             read_only_policies: Vec::new(),
             executions: BTreeMap::new(),
+            verifier_next_plan: 0,
+            verifier_in_flight: None,
         }
     }
 
@@ -73,7 +80,12 @@ impl ApprovalBroker {
         permissions: &RequestedPermissions,
         context: &ApprovalContext,
     ) -> (Vec<String>, CommandClassification) {
-        if context.test_plan.as_ref().is_some_and(|plan| plan.test_command().is_err()) {
+        if context.test_plan.as_ref().is_some_and(|plan| plan.test_command().is_err())
+            || context
+                .verifier_test_plans
+                .as_ref()
+                .is_some_and(|plans| plans.iter().any(|plan| plan.test_command().is_err()))
+        {
             return (Vec::new(), CommandClassification::RejectedPolicyMismatch);
         }
         if permissions.network {
@@ -88,6 +100,71 @@ impl ApprovalBroker {
             .any(|path| !write_path_allowed(path, &context.target_root, &context.temp_root))
         {
             return (Vec::new(), CommandClassification::RejectedFileChange);
+        }
+        if let Some(plans) = context.verifier_test_plans.as_ref() {
+            let mut matching_argv = false;
+            let mut matching_index = None;
+            let mut matching_next = false;
+            for (index, plan) in plans.iter().enumerate() {
+                let parsed_test = (
+                    command_display
+                        .and_then(|command| parse_test_command_argv(command, &plan.argv).ok()),
+                    command_action
+                        .and_then(|command| parse_test_command_argv(command, &plan.argv).ok()),
+                );
+                if parsed_test.0.as_deref() == Some(plan.argv.as_slice())
+                    && parsed_test.1.as_deref() == Some(plan.argv.as_slice())
+                {
+                    matching_argv = true;
+                    matching_index.get_or_insert(index);
+                    if index == self.verifier_next_plan
+                        && same_canonical_path(cwd, &context.checkout_root.join(&plan.cwd_relative))
+                    {
+                        matching_next = true;
+                    }
+                }
+            }
+            if matching_argv {
+                let index = matching_index.expect("matching_argv implies a matching plan");
+                if !matching_next {
+                    return (
+                        plans[index].argv.clone(),
+                        CommandClassification::RejectedPolicyMismatch,
+                    );
+                }
+                let index = self.verifier_next_plan;
+                if !context.test_execution_available || self.verifier_in_flight.is_some() {
+                    return (
+                        plans[index].argv.clone(),
+                        CommandClassification::RejectedPolicyMismatch,
+                    );
+                }
+                let Some(policy) = self.test_policies.iter().find(|policy| {
+                    policy.trusted
+                        && policy.repository_id == context.repository_id
+                        && plans[index].argv.first() == Some(&policy.executable)
+                        && plans[index].argv.starts_with(&policy.argv_prefix)
+                }) else {
+                    return (
+                        plans[index].argv.clone(),
+                        CommandClassification::RejectedPolicyMismatch,
+                    );
+                };
+                let count = self.executions.entry(policy.id.clone()).or_default();
+                if *count >= policy.maximum_executions_per_worker {
+                    return (
+                        plans[index].argv.clone(),
+                        CommandClassification::RejectedPolicyMismatch,
+                    );
+                }
+                *count += 1;
+                self.verifier_next_plan = self.verifier_next_plan.saturating_add(1);
+                self.verifier_in_flight = Some(plans[index].identity_digest());
+                return (
+                    plans[index].argv.clone(),
+                    CommandClassification::AutoApprovedTest { policy_id: policy.id.clone() },
+                );
+            }
         }
         if let Some(plan) = context.test_plan.as_ref()
             && !context.test_execution_available
@@ -163,6 +240,18 @@ impl ApprovalBroker {
         }
         *count += 1;
         (argv, CommandClassification::AutoApprovedReadOnly { policy_id: policy.id.clone() })
+    }
+
+    /// Release the verifier-only sequential gate after the corresponding
+    /// command item has completed and its evidence has been captured. A
+    /// mismatched digest leaves the gate closed fail-closed.
+    pub fn complete_verifier_plan(&mut self, plan_digest: Digest) -> bool {
+        if self.verifier_in_flight == Some(plan_digest) {
+            self.verifier_in_flight = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn automatic_decision(
@@ -821,6 +910,7 @@ mod tests {
                 requires_approval: true,
                 execution_evidence_id: None,
             }),
+            verifier_test_plans: None,
             test_execution_available: true,
         }
     }
@@ -867,6 +957,99 @@ mod tests {
             &context,
         );
         assert_eq!(classification, CommandClassification::RejectedPolicyMismatch);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verifier_gate_waits_for_completed_evidence() {
+        let root =
+            std::env::temp_dir().join(format!("needle-approval-verifier-{}", std::process::id()));
+        for child in ["checkout", "target", "tmp"] {
+            fs::create_dir_all(root.join(child)).unwrap();
+        }
+        let mut context = context(&root);
+        let first = context.test_plan.clone().unwrap();
+        let mut second = first.clone();
+        second.argv[4] = "second".to_owned();
+        second.test_identifier = "second".to_owned();
+        context.test_plan = None;
+        context.verifier_test_plans = Some(vec![first.clone(), second.clone()]);
+        let mut policy = TestCommandPolicy::cargo_test(context.repository_id);
+        policy.maximum_executions_per_worker = 2;
+        let mut broker = ApprovalBroker::new(vec![policy]);
+        let classify = |broker: &mut ApprovalBroker, plan: &TestPlan| {
+            let command = plan.argv.join(" ");
+            broker.classify_command(
+                Some(&command),
+                Some(&command),
+                &context.checkout_root,
+                &RequestedPermissions::default(),
+                &context,
+            )
+        };
+        assert_eq!(classify(&mut broker, &second).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(matches!(
+            classify(&mut broker, &first).1,
+            CommandClassification::AutoApprovedTest { .. }
+        ));
+        assert_eq!(classify(&mut broker, &second).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(broker.complete_verifier_plan(first.identity_digest()));
+        assert_eq!(classify(&mut broker, &first).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(matches!(
+            classify(&mut broker, &second).1,
+            CommandClassification::AutoApprovedTest { .. }
+        ));
+        assert_eq!(classify(&mut broker, &second).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(broker.complete_verifier_plan(second.identity_digest()));
+        assert_eq!(classify(&mut broker, &second).1, CommandClassification::RejectedPolicyMismatch);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verifier_allows_distinct_identifiers_with_same_command_after_completion() {
+        let root = std::env::temp_dir()
+            .join(format!("needle-approval-verifier-same-command-{}", std::process::id()));
+        for child in ["checkout", "target", "tmp"] {
+            fs::create_dir_all(root.join(child)).unwrap();
+        }
+        let mut context = context(&root);
+        let mut first = context.test_plan.clone().unwrap();
+        first.argv = vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "suite::first".to_owned(),
+            "suite::second".to_owned(),
+            "--".to_owned(),
+            "--exact".to_owned(),
+        ];
+        first.test_identifier = "suite::first".to_owned();
+        let mut second = first.clone();
+        second.test_identifier = "suite::second".to_owned();
+        assert!(first.test_command().is_ok());
+        assert!(second.test_command().is_ok());
+        assert_ne!(first.identity_digest(), second.identity_digest());
+        context.test_plan = None;
+        context.verifier_test_plans = Some(vec![first.clone(), second.clone()]);
+        let mut broker =
+            ApprovalBroker::new(vec![TestCommandPolicy::cargo_test(context.repository_id)]);
+        let command = first.argv.join(" ");
+        let classify = |broker: &mut ApprovalBroker| {
+            broker.classify_command(
+                Some(&command),
+                Some(&command),
+                &context.checkout_root,
+                &RequestedPermissions::default(),
+                &context,
+            )
+        };
+
+        assert!(matches!(classify(&mut broker).1, CommandClassification::AutoApprovedTest { .. }));
+        assert_eq!(classify(&mut broker).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(broker.complete_verifier_plan(first.identity_digest()));
+        assert!(matches!(classify(&mut broker).1, CommandClassification::AutoApprovedTest { .. }));
+        assert_eq!(classify(&mut broker).1, CommandClassification::RejectedPolicyMismatch);
+        assert!(broker.complete_verifier_plan(second.identity_digest()));
+        assert_eq!(classify(&mut broker).1, CommandClassification::RejectedPolicyMismatch);
         let _ = fs::remove_dir_all(root);
     }
 

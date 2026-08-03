@@ -126,8 +126,10 @@ validation.
 - Canonical role-profile definitions and revision persistence are implemented
   and offline validated, but there is no HTTP/editor UI, session or worker
   binding, lifecycle executor, or automatic profile activation yet.
-- The verifier handles at most one distinct associated certified test plan;
-  multiple plans produce an inconclusive verdict.
+- The verifier handles a deterministic serial set of up to four distinct
+  associated certified test plans; exact duplicates collapse to one execution,
+  while over-cap and unavailable plans fail closed. This behavior is offline
+  validated only and has no provider-backed verifier evidence.
 - Binary, symlink, submodule, rename, three-way merge, patch reuse, automatic
   commit, and automatic publication are unsupported.
 - Worker execution and orchestration are Codex-only. Claude Code, Cursor,

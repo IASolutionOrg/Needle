@@ -11,6 +11,8 @@ pub const SEMANTIC_ARTIFACT_RESULT_SCHEMA_ID: &str = "needle.artifact-result/2";
 pub const MAX_ROUTE_PLAN_NODES: usize = 16;
 pub const MAX_TEST_COMMAND_ARGV: usize = 16;
 pub const MAX_TEST_COMMAND_ARGUMENT_BYTES: usize = 512;
+/// Hard bound for verifier-owned certified focused tests in one turn.
+pub const MAX_VERIFIER_TEST_PLANS: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -919,6 +921,26 @@ impl TestPlan {
     pub fn test_command(&self) -> Result<TestCommand, Vec<TestCommandViolation>> {
         TestCommand::from_canonical_parts(&self.runner, &self.argv, &self.test_identifier)
     }
+
+    /// Stable identity for a certified focused test.  Execution provenance is
+    /// deliberately excluded: the same canonical plan remains the same plan
+    /// when a later verifier run captures a different evidence item.
+    pub fn identity_digest(&self) -> Digest {
+        let canonical = self.test_command().ok();
+        let runner = canonical.as_ref().map(TestCommand::runner).unwrap_or(&self.runner);
+        let argv = canonical.as_ref().map(TestCommand::argv).unwrap_or(&self.argv);
+        let identifier =
+            canonical.as_ref().map(TestCommand::test_identifier).unwrap_or(&self.test_identifier);
+        let mut hasher = crate::CanonicalHasher::new(b"needle-test-plan-identity-v2");
+        hasher.field_str(runner);
+        hasher.field_u16(argv.len().try_into().unwrap_or(u16::MAX));
+        for argument in argv {
+            hasher.field_str(argument);
+        }
+        hasher.field_str(&self.cwd_relative);
+        hasher.field_str(identifier);
+        hasher.finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1163,5 +1185,22 @@ mod tests {
         assert!(violations.contains(&TestCommandViolation::ArgvScopeNotFocused));
         assert!(violations.contains(&TestCommandViolation::ArgvContainsShellSyntax));
         assert!(violations.contains(&TestCommandViolation::IdentifierInvalidOrUnsafe));
+    }
+
+    #[test]
+    fn test_plan_identity_is_stable_and_excludes_execution_provenance() {
+        let mut plan = TestPlan {
+            runner: "cargo".to_owned(),
+            argv: vec!["cargo".to_owned(), "test".to_owned(), "focused".to_owned()],
+            cwd_relative: ".".to_owned(),
+            test_identifier: "focused".to_owned(),
+            requires_approval: true,
+            execution_evidence_id: None,
+        };
+        let first = plan.identity_digest();
+        plan.execution_evidence_id = Some("evidence-1".to_owned());
+        assert_eq!(first, plan.identity_digest());
+        plan.argv.push("--".to_owned());
+        assert_ne!(first, plan.identity_digest());
     }
 }

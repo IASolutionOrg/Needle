@@ -1,9 +1,12 @@
-use crate::app_server::{AppServerSession, AppServerTurn, AppServerTurnFailure};
+use crate::app_server::{
+    AppServerSession, AppServerTurn, AppServerTurnFailure, CapturedTestEvidence,
+};
 use crate::worker::CodexWorker;
 use needle_core::claim::ClaimPayload;
 use needle_core::{
-    AcceptanceCoverage, AcceptanceStatus, ChangeId, Digest, PatchArtifact, SemanticWorkerArtifact,
-    TestPlan, VerificationArtifact, VerificationStatus, WorkerConfig,
+    AcceptanceCoverage, AcceptanceStatus, ChangeId, Digest, MAX_VERIFIER_TEST_PLANS, PatchArtifact,
+    SemanticWorkerArtifact, TestPlan, VerificationArtifact, VerificationPlanResult,
+    VerificationStatus, VerificationTestProjection, WorkerConfig,
 };
 use needle_runtime::{
     IsolatedCheckout, RuntimeStore, artifact_and_certificate_are_fresh, capture_git_snapshot,
@@ -146,11 +149,27 @@ impl CodexVerifier {
             Ok(associated) => associated,
             Err(error) => return cleanup_sandbox_after_error(sandbox, error),
         };
-        let trusted_plan =
-            settings.trusted_test_execution.then_some(associated.plan.clone()).flatten();
+        let mut associated_plans = associated.plans.clone();
+        if !settings.trusted_test_execution {
+            for entry in &mut associated_plans {
+                entry.available = false;
+                entry.unavailable_reason =
+                    Some("the repository is not trusted for test execution".to_owned());
+            }
+        }
+        let executable_plans = if !associated.over_cap && settings.trusted_test_execution {
+            associated_plans
+                .iter()
+                .filter(|entry| entry.available)
+                .map(|entry| entry.plan.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let instructions = verifier_instructions(
-            trusted_plan.as_ref(),
+            &associated_plans,
             associated.expected,
+            associated.over_cap,
             associated.unavailable_reason.as_deref(),
         );
         let mut session = match AppServerSession::start_verifier(
@@ -162,7 +181,7 @@ impl CodexVerifier {
             sandbox.temp_root(),
             patched_snapshot.source_digest,
             patched_snapshot.repository_id,
-            trusted_plan.clone(),
+            executable_plans,
             settings.trusted_test_execution,
             store.clone(),
         ) {
@@ -176,14 +195,42 @@ impl CodexVerifier {
             Duration::from_secs(config.timeout_seconds),
             self.cancellation.as_deref(),
         );
-        let (declared, input_tokens, cached_input_tokens, output_tokens, evidence_ids) =
-            normalize_verifier_turn(
-                turn,
-                &prepared.request.acceptance_criteria,
-                trusted_plan.as_ref(),
-                associated.expected,
-                associated.unavailable_reason.as_deref(),
-            );
+        let mut unavailable_reason = associated.unavailable_reason.clone();
+        if !session.test_execution_available() && !associated_plans.is_empty() {
+            let reason = session
+                .test_execution_unavailable_reason()
+                .unwrap_or("test execution was unavailable in the verifier session")
+                .to_owned();
+            for entry in &mut associated_plans {
+                if entry.available {
+                    entry.available = false;
+                    entry.unavailable_reason = Some(reason.clone());
+                }
+            }
+            unavailable_reason = Some(match unavailable_reason.take() {
+                Some(previous) => format!("{previous}; {reason}"),
+                None => reason,
+            });
+        }
+        let NormalizedVerifierTurn {
+            declared,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            evidence_ids,
+            plan_results,
+        } = normalize_verifier_turn(
+            turn,
+            NormalizeVerifierContext {
+                requested_criteria: &prepared.request.acceptance_criteria,
+                plans: &associated_plans,
+                test_expected: associated.expected,
+                over_cap: associated.over_cap,
+                unavailable_reason: unavailable_reason.as_deref(),
+                checkout_root: sandbox.checkout_root(),
+                snapshot_digest: patched_snapshot.source_digest,
+            },
+        );
         if let Err(error) = session.cleanup() {
             return cleanup_sandbox_after_error(
                 sandbox,
@@ -205,13 +252,17 @@ impl CodexVerifier {
         }
         let created_unix_ms = now_ms();
         let artifact = VerificationArtifact {
-            id: VerificationArtifact::compute_id(
+            id: VerificationArtifact::compute_id_with_plan_results(
                 change_id,
                 prepared.patch.id,
                 declared.verdict,
                 &declared.acceptance_coverage,
                 &declared.findings,
-                &evidence_ids,
+                VerificationTestProjection {
+                    evidence_ids: &evidence_ids,
+                    plan_results: &plan_results,
+                    plans_over_cap: associated.over_cap,
+                },
                 definition,
             ),
             change_id: change_id.clone(),
@@ -220,6 +271,8 @@ impl CodexVerifier {
             acceptance_coverage: declared.acceptance_coverage,
             findings: declared.findings,
             test_evidence_ids: evidence_ids,
+            test_plan_results: plan_results.clone(),
+            test_plans_over_cap: associated.over_cap,
             verifier_definition: definition,
             created_unix_ms,
         };
@@ -228,7 +281,9 @@ impl CodexVerifier {
             "reasoning": config.reasoning,
             "service_tier": config.service_tier,
             "codex_version": isolation.codex_version,
-            "verifier_started": true
+            "verifier_started": true,
+            "test_plans_over_cap": associated.over_cap,
+            "test_plan_results": plan_results,
         });
         let usage = json!({
             "input_tokens": input_tokens,
@@ -295,6 +350,8 @@ impl CodexVerifier {
             acceptance_coverage,
             findings,
             test_evidence_ids: Vec::new(),
+            test_plan_results: Vec::new(),
+            test_plans_over_cap: false,
             verifier_definition: definition,
             created_unix_ms,
         };
@@ -323,8 +380,16 @@ impl CodexVerifier {
 
 #[derive(Clone, Debug)]
 struct AssociatedTestPlan {
-    plan: Option<TestPlan>,
+    plans: Vec<AssociatedPlan>,
     expected: bool,
+    unavailable_reason: Option<String>,
+    over_cap: bool,
+}
+
+#[derive(Clone, Debug)]
+struct AssociatedPlan {
+    plan: TestPlan,
+    available: bool,
     unavailable_reason: Option<String>,
 }
 
@@ -335,18 +400,12 @@ fn associated_test_plan(
     repository_root: &Path,
 ) -> Result<AssociatedTestPlan, String> {
     let changed = patch.files.iter().map(|file| file.path.as_str()).collect::<BTreeSet<_>>();
-    let mut plans = BTreeMap::<String, TestPlan>::new();
+    let mut plans = BTreeMap::<Digest, AssociatedPlan>::new();
     let mut expected = false;
     let mut unavailable = Vec::new();
     for id in &request.artifact_ids {
         let Some(artifact) =
             store.semantic_artifact(&id.to_string()).map_err(|error| error.to_string())?
-        else {
-            continue;
-        };
-        let Some(certificate) = store
-            .validation_certificate_for_artifact(&id.to_string())
-            .map_err(|error| error.to_string())?
         else {
             continue;
         };
@@ -367,18 +426,36 @@ fn associated_test_plan(
             continue;
         };
         expected = true;
-        if !artifact_and_certificate_are_fresh(&artifact, &certificate, repository_root)
-            || artifact
-                .dependency_manifest
-                .dependencies
-                .iter()
-                .any(|dependency| changed.contains(dependency.path.as_str()))
-            || evidence_paths.iter().any(|path| changed.contains(path.as_str()))
-        {
-            unavailable.push(format!("artifact test plan `{id}` changed or became stale"));
+        if identifiers.len() != 1 {
+            unavailable
+                .push(format!("artifact test plan `{id}` must contain exactly one identifier"));
             continue;
         }
-        insert_plan(&mut plans, runner, argv, cwd_relative, identifiers)?;
+        let plan = plan_from_parts(runner, argv, cwd_relative, identifiers);
+        let mut reasons = Vec::new();
+        let certificate = store
+            .validation_certificate_for_artifact(&id.to_string())
+            .map_err(|error| error.to_string())?;
+        if certificate.as_ref().is_none_or(|certificate| {
+            !artifact_and_certificate_are_fresh(&artifact, certificate, repository_root)
+        }) {
+            reasons.push(format!("artifact test plan `{id}` has no fresh certificate"));
+        }
+        if artifact
+            .dependency_manifest
+            .dependencies
+            .iter()
+            .any(|dependency| changed.contains(dependency.path.as_str()))
+            || evidence_paths.iter().any(|path| changed.contains(path.as_str()))
+        {
+            reasons.push(format!("artifact test plan `{id}` changed or became stale"));
+        }
+        if plan.test_command().is_err() {
+            reasons.push(format!("artifact test plan `{id}` is unsupported or unsafe"));
+        }
+        let available = reasons.is_empty();
+        unavailable.extend(reasons.iter().cloned());
+        insert_associated_plan(&mut plans, plan, available, reasons);
     }
     for id in &request.claim_ids {
         let Some(claim) = store.semantic_claim(*id).map_err(|error| error.to_string())? else {
@@ -396,60 +473,86 @@ fn associated_test_plan(
             continue;
         };
         expected = true;
-        let Some(certificate) =
-            store.claim_validation_certificate_for_claim(*id).map_err(|error| error.to_string())?
-        else {
-            unavailable.push(format!("claim test plan `{id}` has no certificate"));
-            continue;
-        };
-        if !claim_validation_certificate_is_fresh(&certificate, repository_root)
-            || certificate
+        let plan = plan_from_parts(runner, argv, cwd_relative, vec![identifier]);
+        let mut reasons = Vec::new();
+        let certificate =
+            store.claim_validation_certificate_for_claim(*id).map_err(|error| error.to_string())?;
+        if certificate.as_ref().is_none_or(|certificate| {
+            !claim_validation_certificate_is_fresh(certificate, repository_root)
+        }) {
+            reasons.push(format!("claim test plan `{id}` has no fresh certificate"));
+        }
+        if certificate.as_ref().is_some_and(|certificate| {
+            certificate
                 .dependencies
                 .iter()
                 .any(|dependency| changed.contains(dependency.path.as_str()))
-            || evidence_paths.iter().any(|path| changed.contains(path.as_str()))
+        }) || evidence_paths.iter().any(|path| changed.contains(path.as_str()))
         {
-            unavailable.push(format!("claim test plan `{id}` changed or became stale"));
-            continue;
+            reasons.push(format!("claim test plan `{id}` changed or became stale"));
         }
-        insert_plan(&mut plans, runner, argv, cwd_relative, vec![identifier])?;
+        if plan.test_command().is_err() {
+            reasons.push(format!("claim test plan `{id}` is unsupported or unsafe"));
+        }
+        let available = reasons.is_empty();
+        unavailable.extend(reasons.iter().cloned());
+        insert_associated_plan(&mut plans, plan, available, reasons);
     }
-    if plans.len() > 1 {
-        unavailable.push(
-            "multiple distinct certified test plans require a future verifier adapter".to_owned(),
-        );
-        plans.clear();
+    let over_cap = plans.len() > MAX_VERIFIER_TEST_PLANS;
+    if over_cap {
+        unavailable.push(format!(
+            "{} distinct certified test plans exceed the verifier bound of {}",
+            plans.len(),
+            MAX_VERIFIER_TEST_PLANS
+        ));
     }
+    let unavailable_reason = (!unavailable.is_empty())
+        .then(|| bounded_text(&unavailable.join("; "), MAX_VERIFIER_TEXT_BYTES));
     Ok(AssociatedTestPlan {
-        plan: plans.into_values().next(),
+        plans: plans.into_values().collect(),
         expected,
-        unavailable_reason: (!unavailable.is_empty()).then(|| unavailable.join("; ")),
+        unavailable_reason,
+        over_cap,
     })
 }
 
-fn insert_plan(
-    plans: &mut BTreeMap<String, TestPlan>,
+fn plan_from_parts(
     runner: String,
     argv: Vec<String>,
     cwd_relative: String,
     identifiers: Vec<String>,
-) -> Result<(), String> {
-    if identifiers.len() != 1 {
-        return Err("certified test plan must contain exactly one identifier".to_owned());
-    }
-    let identifier = identifiers.into_iter().next().expect("identifier length was checked");
-    let plan = TestPlan {
+) -> TestPlan {
+    TestPlan {
         runner,
         argv,
         cwd_relative,
-        test_identifier: identifier,
+        test_identifier: identifiers.into_iter().next().unwrap_or_default(),
         requires_approval: true,
         execution_evidence_id: None,
-    };
-    plan.test_command().map_err(|_| "certified test plan is no longer safe".to_owned())?;
-    let key = serde_json::to_string(&plan).map_err(|error| error.to_string())?;
-    plans.insert(key, plan);
-    Ok(())
+    }
+}
+
+fn insert_associated_plan(
+    plans: &mut BTreeMap<Digest, AssociatedPlan>,
+    plan: TestPlan,
+    available: bool,
+    reasons: Vec<String>,
+) {
+    let digest = plan.identity_digest();
+    let reason =
+        (!reasons.is_empty()).then(|| bounded_text(&reasons.join("; "), MAX_VERIFIER_TEXT_BYTES));
+    if let Some(existing) = plans.get_mut(&digest) {
+        existing.available &= available;
+        if let Some(reason) = reason {
+            let merged = match existing.unavailable_reason.take() {
+                Some(previous) => format!("{previous}; {reason}"),
+                None => reason,
+            };
+            existing.unavailable_reason = Some(bounded_text(&merged, MAX_VERIFIER_TEXT_BYTES));
+        }
+    } else {
+        plans.insert(digest, AssociatedPlan { plan, available, unavailable_reason: reason });
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -460,23 +563,66 @@ struct DeclaredVerification {
     findings: Vec<String>,
 }
 
+struct NormalizeVerifierContext<'a> {
+    requested_criteria: &'a [String],
+    plans: &'a [AssociatedPlan],
+    test_expected: bool,
+    over_cap: bool,
+    unavailable_reason: Option<&'a str>,
+    checkout_root: &'a Path,
+    snapshot_digest: Digest,
+}
+
+struct NormalizedVerifierTurn {
+    declared: DeclaredVerification,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    evidence_ids: Vec<String>,
+    plan_results: Vec<VerificationPlanResult>,
+}
+
 fn normalize_verifier_turn(
     turn: Result<AppServerTurn, AppServerTurnFailure>,
-    requested_criteria: &[String],
-    test_plan: Option<&TestPlan>,
-    test_expected: bool,
-    unavailable_reason: Option<&str>,
-) -> (DeclaredVerification, Option<u64>, Option<u64>, Option<u64>, Vec<String>) {
+    context: NormalizeVerifierContext<'_>,
+) -> NormalizedVerifierTurn {
+    let NormalizeVerifierContext {
+        requested_criteria,
+        plans,
+        test_expected,
+        over_cap,
+        unavailable_reason,
+        checkout_root,
+        snapshot_digest,
+    } = context;
     let turn = match turn {
         Ok(turn) => turn,
         Err(failure) => {
-            return (
-                inconclusive_verification(&failure.diagnostic),
-                failure.input_tokens,
-                failure.cached_input_tokens,
-                failure.output_tokens,
-                Vec::new(),
-            );
+            let plan_results =
+                plan_results(plans, &[], None, Some(&failure.diagnostic), over_cap, None);
+            let mut declared = inconclusive_verification(&failure.diagnostic);
+            if test_expected {
+                append_authoritative_finding(
+                    &mut declared,
+                    unavailable_reason.unwrap_or(
+                        "one or more associated focused tests lacked complete execution evidence",
+                    ),
+                );
+            }
+            if over_cap {
+                append_authoritative_finding(
+                    &mut declared,
+                    "the verifier test-plan bound was exceeded; no truncated subset was authorized",
+                );
+            }
+            return NormalizedVerifierTurn {
+                declared,
+                input_tokens: failure.input_tokens,
+                cached_input_tokens: failure.cached_input_tokens,
+                output_tokens: failure.output_tokens,
+                evidence_ids: Vec::new(),
+                plan_results,
+            };
         }
     };
     let mut declared = serde_json::from_value::<DeclaredVerification>(turn.response)
@@ -506,24 +652,48 @@ fn normalize_verifier_turn(
             "verifier did not account for every acceptance criterion exactly once",
         );
     }
-    let mut evidence_ids = Vec::new();
-    if let Some(plan) = test_plan {
-        if let Some(evidence) = turn
-            .command_evidence
-            .iter()
-            .find(|evidence| validate_test_evidence(plan, evidence).is_ok())
+    let plan_results = plan_results(
+        plans,
+        &turn.test_evidence,
+        Some(checkout_root),
+        None,
+        over_cap,
+        Some(snapshot_digest),
+    );
+    let evidence_ids =
+        plan_results.iter().filter_map(|result| result.evidence_id.clone()).collect::<Vec<_>>();
+    let expected_plans_valid = !test_expected
+        || (!plans.is_empty()
+            && !over_cap
+            && plan_results.iter().all(|result| {
+                !result.expected || (result.available && result.executed && result.passed)
+            })
+            && evidence_ids.len() == plan_results.iter().filter(|result| result.expected).count());
+    if test_expected && !expected_plans_valid {
+        let reason = unavailable_reason
+            .unwrap_or("one or more associated focused tests lacked complete execution evidence");
+        if matches!(declared.verdict, VerificationStatus::Verified | VerificationStatus::Repairable)
         {
-            evidence_ids.push(evidence.id.clone());
-        } else if declared.verdict == VerificationStatus::Verified {
             declared.verdict = VerificationStatus::Inconclusive;
-            declared.findings.push(
-                "the certified focused test did not produce valid execution evidence".to_owned(),
-            );
         }
-    } else if test_expected && declared.verdict == VerificationStatus::Verified {
+        append_authoritative_finding(&mut declared, reason);
+    }
+    if over_cap {
         declared.verdict = VerificationStatus::Inconclusive;
-        declared.findings.push(
-            unavailable_reason.unwrap_or("the associated test plan was unavailable").to_owned(),
+        append_authoritative_finding(
+            &mut declared,
+            "the verifier test-plan bound was exceeded; no truncated subset was authorized",
+        );
+    }
+    if test_expected
+        && turn.test_evidence.iter().any(|evidence| {
+            !plans.iter().any(|plan| plan.plan.identity_digest() == evidence.plan_digest)
+        })
+    {
+        declared.verdict = VerificationStatus::Inconclusive;
+        append_authoritative_finding(
+            &mut declared,
+            "runtime captured test evidence for an undeclared plan",
         );
     }
     if declared.verdict == VerificationStatus::Verified
@@ -539,7 +709,116 @@ fn normalize_verifier_turn(
             .findings
             .push("verified verdict lacked complete acceptance or observation evidence".to_owned());
     }
-    (declared, turn.input_tokens, turn.cached_input_tokens, turn.output_tokens, evidence_ids)
+    NormalizedVerifierTurn {
+        declared,
+        input_tokens: turn.input_tokens,
+        cached_input_tokens: turn.cached_input_tokens,
+        output_tokens: turn.output_tokens,
+        evidence_ids,
+        plan_results,
+    }
+}
+
+fn append_authoritative_finding(declared: &mut DeclaredVerification, reason: &str) {
+    let reason = bounded_text(reason, MAX_VERIFIER_TEXT_BYTES);
+    if declared.findings.iter().any(|finding| finding == &reason) {
+        return;
+    }
+    if declared.findings.len() >= MAX_VERIFIER_FINDINGS {
+        declared.findings.pop();
+    }
+    declared.findings.push(reason);
+}
+
+fn plan_results(
+    plans: &[AssociatedPlan],
+    captured: &[CapturedTestEvidence],
+    checkout_root: Option<&Path>,
+    turn_failure: Option<&str>,
+    over_cap: bool,
+    snapshot_digest: Option<Digest>,
+) -> Vec<VerificationPlanResult> {
+    if over_cap {
+        // Never serialize a truncated subset: the complete over-cap set is
+        // represented by the bounded top-level inconclusive finding.
+        return Vec::new();
+    }
+    let mut used_evidence = BTreeSet::new();
+    plans
+        .iter()
+        .map(|entry| {
+            let digest = entry.plan.identity_digest();
+            let matching = captured
+                .iter()
+                .filter(|captured| captured.plan_digest == digest)
+                .collect::<Vec<_>>();
+            let evidence = matching.first().map(|captured| &captured.evidence);
+            let mut reason = entry.unavailable_reason.clone();
+            if let Some(failure) = turn_failure {
+                reason = Some(bounded_text(
+                    &match reason.take() {
+                        Some(previous) => format!("{previous}; {failure}"),
+                        None => failure.to_owned(),
+                    },
+                    MAX_VERIFIER_TEXT_BYTES,
+                ));
+            }
+            let executed = !matching.is_empty();
+            let mut passed = false;
+            let mut evidence_id = evidence.map(|evidence| evidence.id.clone());
+            if matching.len() > 1 {
+                reason =
+                    Some("multiple evidence items were captured for one declared plan".to_owned());
+            } else if let Some(evidence) = evidence {
+                if !used_evidence.insert(evidence.id.clone()) {
+                    evidence_id = None;
+                    reason =
+                        Some("one evidence item was associated with multiple plans".to_owned());
+                } else if !entry.available || over_cap {
+                    reason = reason.or_else(|| Some("plan was unavailable".to_owned()));
+                } else if snapshot_digest
+                    .is_some_and(|snapshot| evidence.source_snapshot_digest != snapshot)
+                {
+                    reason = Some(
+                        "captured command evidence snapshot did not match the patched checkout"
+                            .to_owned(),
+                    );
+                } else if validate_test_evidence(&entry.plan, evidence).is_err() {
+                    reason =
+                        Some("captured command evidence failed focused-test validation".to_owned());
+                } else if let Some(root) = checkout_root {
+                    let expected_cwd = root.join(&entry.plan.cwd_relative);
+                    let cwd_matches = std::fs::canonicalize(&expected_cwd)
+                        .ok()
+                        .zip(std::fs::canonicalize(&evidence.cwd).ok())
+                        .is_some_and(|(expected, actual)| expected == actual);
+                    if !cwd_matches {
+                        reason =
+                            Some("captured command evidence cwd did not match the plan".to_owned());
+                    } else {
+                        passed = true;
+                    }
+                } else {
+                    passed = true;
+                }
+            } else if reason.is_none() {
+                reason = Some("missing command evidence for the declared plan".to_owned());
+            }
+            VerificationPlanResult {
+                plan_digest: digest,
+                runner: entry.plan.runner.clone(),
+                argv: entry.plan.argv.clone(),
+                cwd_relative: entry.plan.cwd_relative.clone(),
+                test_identifier: entry.plan.test_identifier.clone(),
+                expected: true,
+                available: entry.available,
+                executed,
+                passed,
+                evidence_id,
+                failure_reason: reason.map(|reason| bounded_text(&reason, MAX_VERIFIER_TEXT_BYTES)),
+            }
+        })
+        .collect()
 }
 
 fn inconclusive_verification(reason: &str) -> DeclaredVerification {
@@ -551,23 +830,52 @@ fn inconclusive_verification(reason: &str) -> DeclaredVerification {
 }
 
 fn verifier_instructions(
-    plan: Option<&TestPlan>,
+    plans: &[AssociatedPlan],
     test_expected: bool,
+    over_cap: bool,
     unavailable_reason: Option<&str>,
 ) -> String {
-    let test = if let Some(plan) = plan {
+    let mut test = if over_cap {
         format!(
-            "Execute exactly this certified focused test once and no other test command: {:?}. A verified verdict requires observing it pass.",
-            plan.argv
+            "The complete certified plan set contains {} plans, exceeding the hard bound of {MAX_VERIFIER_TEST_PLANS}; no test command is authorized and no subset may be executed.",
+            plans.len()
         )
-    } else if test_expected {
-        format!(
-            "A related test exists but cannot be executed safely in this verification ({}) . Do not run tests and return inconclusive if test evidence is necessary.",
-            unavailable_reason.unwrap_or("unavailable certified plan")
-        )
+    } else if plans.is_empty() {
+        if test_expected {
+            format!(
+                "A related test exists but no complete certified plan is available ({}). Do not run tests and return inconclusive if test evidence is necessary.",
+                bounded_text(
+                    unavailable_reason.unwrap_or("unavailable certified plan"),
+                    MAX_VERIFIER_TEXT_BYTES
+                )
+            )
+        } else {
+            "No certified focused test is associated with this change. Do not run tests; perform bounded static verification.".to_owned()
+        }
     } else {
-        "No certified focused test is associated with this change. Do not run tests; perform bounded static verification.".to_owned()
+        "Certified focused plans are ordered below. Execute each available plan exactly once, sequentially, using the exact runner, argv, cwd, and identifier. Never execute an unavailable plan; any unavailable expected plan forces an inconclusive verdict.".to_owned()
     };
+    if !over_cap {
+        test.push_str("\nOrdered certified plans:\n");
+        for (index, entry) in plans.iter().enumerate() {
+            let reason = entry
+                .unavailable_reason
+                .as_deref()
+                .map(|reason| format!(" reason={}", bounded_text(reason, MAX_VERIFIER_TEXT_BYTES)))
+                .unwrap_or_default();
+            test.push_str(&format!(
+                "- {}: digest={} runner={} argv={:?} cwd_relative={} test_identifier={} available={}{}\n",
+                index + 1,
+                entry.plan.identity_digest(),
+                entry.plan.runner,
+                entry.plan.argv,
+                entry.plan.cwd_relative,
+                entry.plan.test_identifier,
+                entry.available,
+                reason
+            ));
+        }
+    }
     format!(
         "You are Needle's independent verifier. The patch is already materialized in a read-only disposable checkout. You have no patcher transcript and must not modify files. Check the actual filesystem against every acceptance criterion. Use only bounded repository inspection, no network, credentials, hooks, plugins, MCP, project instructions, or other agents. {test} Return only JSON matching the output schema."
     )
@@ -616,8 +924,11 @@ fn verifier_output_schema() -> Value {
 }
 
 fn verifier_definition() -> Digest {
-    let mut hasher = needle_core::CanonicalHasher::new(b"needle-verifier-definition");
-    hasher.field_str("independent-read-only-v1");
+    let mut hasher = needle_core::CanonicalHasher::new(b"needle-verifier-definition-v2");
+    hasher.field_str("independent-read-only-v2");
+    hasher.field_u16(MAX_VERIFIER_TEST_PLANS as u16);
+    hasher.field_str("ordered-plan-results");
+    hasher.field_str("runner argv cwd_relative test_identifier expected available executed passed evidence_id failure_reason");
     hasher.field_bytes(&serde_json::to_vec(&verifier_output_schema()).unwrap_or_default());
     hasher.finish()
 }
@@ -661,24 +972,90 @@ mod tests {
             output_tokens: Some(3),
             approval_wait: Duration::ZERO,
             command_evidence: Vec::new(),
+            test_evidence: Vec::new(),
             observation_trace: Default::default(),
             file_change_approvals_granted: 0,
         }
     }
 
+    fn normalize_test_turn<'a>(
+        turn: Result<AppServerTurn, AppServerTurnFailure>,
+        requested_criteria: &'a [String],
+        plans: &'a [AssociatedPlan],
+        test_expected: bool,
+        over_cap: bool,
+        unavailable_reason: Option<&'a str>,
+        snapshot_digest: Digest,
+    ) -> NormalizedVerifierTurn {
+        normalize_verifier_turn(
+            turn,
+            NormalizeVerifierContext {
+                requested_criteria,
+                plans,
+                test_expected,
+                over_cap,
+                unavailable_reason,
+                checkout_root: Path::new("."),
+                snapshot_digest,
+            },
+        )
+    }
+
+    fn plan(identifier: &str) -> TestPlan {
+        TestPlan {
+            runner: "cargo".to_owned(),
+            argv: vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                identifier.to_owned(),
+                "--".to_owned(),
+                "--exact".to_owned(),
+            ],
+            cwd_relative: ".".to_owned(),
+            test_identifier: identifier.to_owned(),
+            requires_approval: true,
+            execution_evidence_id: None,
+        }
+    }
+
+    fn evidence(plan: &TestPlan, id: &str, snapshot: Digest) -> CapturedTestEvidence {
+        CapturedTestEvidence {
+            plan_digest: plan.identity_digest(),
+            evidence: needle_core::CommandExecutionEvidence {
+                id: id.to_owned(),
+                approval_id: format!("approval-{id}"),
+                argv: plan.argv.clone(),
+                cwd: ".".to_owned(),
+                source_snapshot_digest: snapshot,
+                runner: "cargo".to_owned(),
+                runner_version: None,
+                exit_status: Some(0),
+                duration_ms: 1,
+                output_digest: Digest::blake3("output"),
+                output_preview: format!("running 1 test\ntest {} ... ok\n", plan.test_identifier),
+                test_identifier: Some(plan.test_identifier.clone()),
+                tests_executed: Some(1),
+                infrastructure_failure: None,
+            },
+        }
+    }
+
     #[test]
     fn verified_requires_exact_acceptance_coverage() {
-        let (verification, ..) = normalize_verifier_turn(
+        let verification = normalize_test_turn(
             Ok(turn(json!({
                 "verdict": "verified",
                 "acceptance_coverage": [],
                 "findings": []
             }))),
             &["criterion".to_owned()],
-            None,
+            &[],
+            false,
             false,
             None,
-        );
+            Digest::blake3("snapshot"),
+        )
+        .declared;
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
     }
 
@@ -698,7 +1075,7 @@ mod tests {
             requires_approval: true,
             execution_evidence_id: None,
         };
-        let (verification, ..) = normalize_verifier_turn(
+        let verification = normalize_test_turn(
             Ok(turn(json!({
                 "verdict": "verified",
                 "acceptance_coverage": [{
@@ -709,11 +1086,302 @@ mod tests {
                 "findings": []
             }))),
             &["criterion".to_owned()],
-            Some(&plan),
+            &[AssociatedPlan { plan, available: true, unavailable_reason: None }],
             true,
+            false,
             None,
-        );
+            Digest::blake3("snapshot"),
+        )
+        .declared;
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(verification.findings.iter().any(|finding| finding.contains("focused test")));
+    }
+
+    #[test]
+    fn associated_plan_dedup_is_exact_and_ordered() {
+        let first = plan("suite::first");
+        let second = plan("suite::second");
+        let mut duplicate = first.clone();
+        duplicate.execution_evidence_id = Some("old-evidence".to_owned());
+        let first_digest = first.identity_digest();
+        let mut plans = BTreeMap::new();
+        insert_associated_plan(&mut plans, second, true, Vec::new());
+        insert_associated_plan(&mut plans, first, true, Vec::new());
+        insert_associated_plan(&mut plans, duplicate, false, vec!["stale certificate".to_owned()]);
+
+        assert_eq!(plans.len(), 2);
+        let digests = plans.keys().copied().collect::<Vec<_>>();
+        assert!(digests.windows(2).all(|pair| pair[0] < pair[1]));
+        let merged = plans.get(&first_digest).expect("duplicate plan is retained");
+        assert!(!merged.available);
+        assert!(
+            merged
+                .unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stale certificate"))
+        );
+        assert_eq!(merged.plan.identity_digest(), first_digest);
+    }
+
+    #[test]
+    fn incomplete_expected_plan_adds_authoritative_finding() {
+        let associated = AssociatedPlan {
+            plan: plan("suite::unavailable"),
+            available: false,
+            unavailable_reason: Some("certificate is stale".to_owned()),
+        };
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(turn(json!({
+                    "verdict": "rejected",
+                    "acceptance_coverage": [{
+                        "criterion": "criterion",
+                        "status": "addressed",
+                        "evidence": "static"
+                    }],
+                    "findings": []
+                }))),
+                &["criterion".to_owned()],
+                &[associated],
+                true,
+                false,
+                Some("certificate is stale"),
+                Digest::blake3("snapshot"),
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Rejected);
+        assert!(
+            verification.findings.iter().any(|finding| finding.contains("certificate is stale"))
+        );
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].passed);
+    }
+
+    #[test]
+    fn invalid_or_partial_plan_evidence_cannot_verify() {
+        let snapshot = Digest::blake3("snapshot");
+        let certified = plan("suite::invalid");
+        let mut captured = evidence(&certified, "evidence-invalid", snapshot);
+        captured.evidence.exit_status = Some(1);
+        captured.evidence.output_preview =
+            "running 1 test\ntest suite::invalid ... FAILED\n".to_owned();
+        let mut verifier_turn = turn(json!({
+            "verdict": "verified",
+            "acceptance_coverage": [{
+                "criterion": "criterion",
+                "status": "addressed",
+                "evidence": "runtime"
+            }],
+            "findings": []
+        }));
+        verifier_turn.test_evidence = vec![captured];
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &[AssociatedPlan { plan: certified, available: true, unavailable_reason: None }],
+                true,
+                false,
+                None,
+                snapshot,
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].executed);
+        assert!(!records[0].passed);
+        assert!(
+            records[0]
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("focused-test validation"))
+        );
+    }
+
+    #[test]
+    fn snapshot_empty_execution_and_undeclared_evidence_fail_closed() {
+        let snapshot = Digest::blake3("snapshot");
+        let certified = plan("suite::certified");
+        let associated =
+            [AssociatedPlan { plan: certified.clone(), available: true, unavailable_reason: None }];
+
+        let mut mismatched = evidence(&certified, "evidence-snapshot", Digest::blake3("other"));
+        let mut verifier_turn = turn(json!({
+            "verdict": "verified",
+            "acceptance_coverage": [{
+                "criterion": "criterion",
+                "status": "addressed",
+                "evidence": "runtime"
+            }],
+            "findings": []
+        }));
+        verifier_turn.test_evidence = vec![mismatched.clone()];
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
+        assert!(
+            records[0].failure_reason.as_deref().is_some_and(|reason| reason.contains("snapshot"))
+        );
+
+        mismatched = evidence(&certified, "evidence-empty", snapshot);
+        mismatched.evidence.tests_executed = Some(0);
+        mismatched.evidence.output_preview =
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed\n".to_owned();
+        let mut verifier_turn = turn(json!({
+            "verdict": "verified",
+            "acceptance_coverage": [{
+                "criterion": "criterion",
+                "status": "addressed",
+                "evidence": "runtime"
+            }],
+            "findings": []
+        }));
+        verifier_turn.test_evidence = vec![mismatched];
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
+        assert!(
+            records[0]
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("focused-test validation"))
+        );
+
+        let undeclared = plan("suite::undeclared");
+        let mut verifier_turn = turn(json!({
+            "verdict": "verified",
+            "acceptance_coverage": [{
+                "criterion": "criterion",
+                "status": "addressed",
+                "evidence": "runtime"
+            }],
+            "findings": []
+        }));
+        verifier_turn.test_evidence = vec![evidence(&undeclared, "evidence-undeclared", snapshot)];
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
+        assert!(verification.findings.iter().any(|finding| finding.contains("undeclared plan")));
+        assert!(records[0].evidence_id.is_none());
+    }
+
+    #[test]
+    fn two_and_four_ordered_plans_require_distinct_runtime_evidence() {
+        let snapshot = Digest::blake3("snapshot");
+        for count in [2, 4] {
+            let mut plans = (0..count)
+                .map(|index| AssociatedPlan {
+                    plan: plan(&format!("suite::case_{index}")),
+                    available: true,
+                    unavailable_reason: None,
+                })
+                .collect::<Vec<_>>();
+            plans.sort_by_key(|entry| entry.plan.identity_digest());
+            let captured = plans
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| evidence(&entry.plan, &format!("evidence-{index}"), snapshot))
+                .collect::<Vec<_>>();
+            let NormalizedVerifierTurn {
+                declared: verification,
+                evidence_ids,
+                plan_results: records,
+                ..
+            } = normalize_test_turn(
+                Ok({
+                    let mut turn = turn(json!({
+                        "verdict": "verified",
+                        "acceptance_coverage": [{
+                            "criterion": "criterion",
+                            "status": "addressed",
+                            "evidence": "runtime"
+                        }],
+                        "findings": []
+                    }));
+                    turn.test_evidence = captured;
+                    turn
+                }),
+                &["criterion".to_owned()],
+                &plans,
+                true,
+                false,
+                None,
+                snapshot,
+            );
+            assert_eq!(verification.verdict, VerificationStatus::Verified);
+            assert_eq!(evidence_ids.len(), count);
+            assert_eq!(records.len(), count);
+            assert!(records.iter().all(|record| record.passed));
+        }
+    }
+
+    #[test]
+    fn over_cap_plan_set_authorizes_no_subset() {
+        let plans = (0..5)
+            .map(|index| AssociatedPlan {
+                plan: plan(&format!("suite::case_{index}")),
+                available: true,
+                unavailable_reason: None,
+            })
+            .collect::<Vec<_>>();
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(turn(json!({
+                    "verdict": "verified",
+                    "acceptance_coverage": [{
+                        "criterion": "criterion",
+                        "status": "addressed",
+                        "evidence": "static"
+                    }],
+                    "findings": []
+                }))),
+                &["criterion".to_owned()],
+                &plans,
+                true,
+                true,
+                Some("5 plans"),
+                Digest::blake3("snapshot"),
+            );
+        assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
+        assert!(verification.findings.iter().any(|finding| finding.contains("test-plan bound")));
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn over_cap_instructions_redact_plan_details() {
+        let plans = (0..5)
+            .map(|index| AssociatedPlan {
+                plan: plan(&format!("suite::case_{index}")),
+                available: true,
+                unavailable_reason: None,
+            })
+            .collect::<Vec<_>>();
+        let instructions = verifier_instructions(&plans, true, true, Some("internal details"));
+        assert!(instructions.contains("exceeding the hard bound"));
+        assert!(!instructions.contains("suite::case_0"));
+        assert!(!instructions.contains("argv=["));
+        assert!(!instructions.contains("digest="));
     }
 }

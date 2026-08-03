@@ -1,8 +1,10 @@
+use needle_core::{MAX_VERIFIER_TEST_PLANS, TestPlan};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TEST_COMMAND: &str = "cargo test suite::focused -- --exact";
 const R44_TEST_COMMAND: &str =
@@ -204,6 +206,23 @@ struct Simulator {
     turn: u32,
     pending_approval: Option<PendingApproval>,
     pending_main_turn: Option<String>,
+    verifier_plans: Vec<SimulatorVerifierPlan>,
+    verifier_next_plan: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SimulatorVerifierPlan {
+    plan: TestPlan,
+    available: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSimulatorVerifierPlan {
+    runner: String,
+    argv: Vec<String>,
+    cwd_relative: String,
+    test_identifier: String,
+    available: bool,
 }
 
 struct PendingApproval {
@@ -212,6 +231,44 @@ struct PendingApproval {
     item_id: String,
     test_plan: bool,
     file_change: bool,
+}
+
+fn requested_verifier_plans(codex_home: &Path) -> Vec<SimulatorVerifierPlan> {
+    let Ok(value) = fs::read_to_string(codex_home.join(".needle-simulation-verifier-plans")) else {
+        return Vec::new();
+    };
+    let Ok(raw) = serde_json::from_str::<Vec<RawSimulatorVerifierPlan>>(&value) else {
+        return Vec::new();
+    };
+    let mut plans = raw
+        .into_iter()
+        .map(|raw| SimulatorVerifierPlan {
+            plan: TestPlan {
+                runner: raw.runner,
+                argv: raw.argv,
+                cwd_relative: raw.cwd_relative,
+                test_identifier: raw.test_identifier,
+                requires_approval: true,
+                execution_evidence_id: None,
+            },
+            available: raw.available,
+        })
+        .collect::<Vec<_>>();
+    plans.sort_by_key(|entry| entry.plan.identity_digest());
+    let mut distinct: Vec<SimulatorVerifierPlan> = Vec::with_capacity(plans.len());
+    for entry in plans {
+        if let Some(previous) = distinct.last_mut()
+            && previous.plan.identity_digest() == entry.plan.identity_digest()
+        {
+            previous.available &= entry.available;
+        } else {
+            distinct.push(entry);
+        }
+    }
+    if distinct.len() > MAX_VERIFIER_TEST_PLANS {
+        return Vec::new();
+    }
+    distinct.into_iter().filter(|entry| entry.available).collect()
 }
 
 impl Simulator {
@@ -299,6 +356,15 @@ impl Simulator {
                         .trim()
                         .to_owned()
                 };
+                self.verifier_plans = if self.scenario == "verifier_worker" {
+                    env::var_os("CODEX_HOME")
+                        .map(PathBuf::from)
+                        .map(|codex_home| requested_verifier_plans(&codex_home))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                self.verifier_next_plan = 0;
                 self.main_mode = message
                     .pointer("/params/developerInstructions")
                     .and_then(Value::as_str)
@@ -540,6 +606,9 @@ impl Simulator {
             }
             if contents != "changed by isolated patcher\n" {
                 return Err("verifier did not receive the materialized patch".to_owned());
+            }
+            if self.scenario == "verifier_worker" && !self.verifier_plans.is_empty() {
+                return self.emit_verifier_approval(&turn_id, output);
             }
             return self.complete_turn(
                 &turn_id,
@@ -927,34 +996,54 @@ impl Simulator {
     fn complete_approved_command(&mut self, output: &mut impl Write) -> Result<(), String> {
         let pending =
             self.pending_approval.take().ok_or_else(|| "approval state is missing".to_owned())?;
-        let expected_command = match self.scenario.as_str() {
-            "worker_r44" => R44_TEST_COMMAND,
-            "main_direct_read_only" => MAIN_DIRECT_READ_COMMAND,
-            "main_direct_r84_pending_approval" => MAIN_DIRECT_R84_SCRIPT,
-            _ => TEST_COMMAND,
-        };
+        let verifier_plan = (self.scenario == "verifier_worker" && pending.test_plan)
+            .then(|| self.verifier_plans.get(self.verifier_next_plan))
+            .flatten();
+        let expected_command =
+            verifier_plan.map(|entry| entry.plan.argv.join(" ")).unwrap_or_else(|| {
+                match self.scenario.as_str() {
+                    "worker_r44" => R44_TEST_COMMAND.to_owned(),
+                    "main_direct_read_only" => MAIN_DIRECT_READ_COMMAND.to_owned(),
+                    "main_direct_r84_pending_approval" => MAIN_DIRECT_R84_SCRIPT.to_owned(),
+                    _ => TEST_COMMAND.to_owned(),
+                }
+            });
         let (command, action) = if self.scenario == "payload_mismatch" {
-            (TEST_COMMAND, "cargo test other -- --exact")
+            (TEST_COMMAND.to_owned(), "cargo test other -- --exact".to_owned())
         } else {
-            (expected_command, expected_command)
+            (expected_command.clone(), expected_command)
         };
-        let (exit_code, test_output) = match self.scenario.as_str() {
-            "wrong_test_identifier" => {
-                (0, "\nrunning 1 test\ntest other ... ok\n\ntest result: ok. 1 passed; 0 failed\n")
-            }
-            "no_test_executed" => (0, "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed\n"),
-            "test_exit_failure" => (
-                1,
-                "\nrunning 1 test\ntest suite::focused ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed\n",
-            ),
-            "worker_r44" => (
+        let (exit_code, test_output) = if let Some(entry) = verifier_plan {
+            (
                 0,
-                "\nrunning 1 test\ntest misc::glob_always_case_insensitive ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
-            ),
-            _ => (
-                0,
-                "\nrunning 1 test\ntest suite::focused ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
-            ),
+                format!(
+                    "\nrunning 1 test\ntest {} ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
+                    entry.plan.test_identifier
+                ),
+            )
+        } else {
+            let (exit_code, test_output) = match self.scenario.as_str() {
+                "wrong_test_identifier" => (
+                    0,
+                    "\nrunning 1 test\ntest other ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
+                ),
+                "no_test_executed" => {
+                    (0, "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed\n")
+                }
+                "test_exit_failure" => (
+                    1,
+                    "\nrunning 1 test\ntest suite::focused ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed\n",
+                ),
+                "worker_r44" => (
+                    0,
+                    "\nrunning 1 test\ntest misc::glob_always_case_insensitive ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
+                ),
+                _ => (
+                    0,
+                    "\nrunning 1 test\ntest suite::focused ... ok\n\ntest result: ok. 1 passed; 0 failed\n",
+                ),
+            };
+            (exit_code, test_output.to_owned())
         };
         emit(
             output,
@@ -992,6 +1081,25 @@ impl Simulator {
                 output,
             );
         }
+        if pending.test_plan && self.scenario == "verifier_worker" {
+            self.verifier_next_plan = self.verifier_next_plan.saturating_add(1);
+            if self.verifier_next_plan < self.verifier_plans.len() {
+                return self.emit_verifier_approval(&pending.turn_id, output);
+            }
+            return self.complete_turn(
+                &pending.turn_id,
+                json!({
+                    "verdict": "verified",
+                    "acceptance_coverage": [{
+                        "criterion": "The fixture changes.",
+                        "status": "addressed",
+                        "evidence": "fixture.txt contains the updated text"
+                    }],
+                    "findings": []
+                }),
+                output,
+            );
+        }
         self.complete_turn(
             &pending.turn_id,
             if self.scenario == "worker_r44" {
@@ -1003,6 +1111,45 @@ impl Simulator {
             },
             output,
         )
+    }
+
+    fn emit_verifier_approval(
+        &mut self,
+        turn_id: &str,
+        output: &mut impl Write,
+    ) -> Result<(), String> {
+        let entry = self
+            .verifier_plans
+            .get(self.verifier_next_plan)
+            .ok_or_else(|| "verifier plan cursor is out of bounds".to_owned())?;
+        let item_id = format!("needle-sim-verifier-command-{}", self.verifier_next_plan);
+        let request_id = json!(9200 + self.verifier_next_plan);
+        let command = entry.plan.argv.join(" ");
+        emit(
+            output,
+            json!({
+                "id": request_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": self.thread_id,
+                    "turnId": turn_id,
+                    "approvalId": format!("verifier-approval-{}", self.verifier_next_plan),
+                    "itemId": item_id,
+                    "command": command,
+                    "cwd": self.checkout,
+                    "commandActions": [{"type": "unknown", "command": command}],
+                    "additionalPermissions": {}
+                }
+            }),
+        )?;
+        self.pending_approval = Some(PendingApproval {
+            request_id,
+            turn_id: turn_id.to_owned(),
+            item_id,
+            test_plan: true,
+            file_change: false,
+        });
+        Ok(())
     }
 
     fn complete_approved_file_change(

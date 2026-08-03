@@ -1344,6 +1344,7 @@ mod tests {
             output_tokens: Some(2),
             approval_wait: Duration::from_secs(120),
             command_evidence: Vec::new(),
+            test_evidence: Vec::new(),
             observation_trace: Default::default(),
             file_change_approvals_granted: 0,
         };
@@ -1354,6 +1355,7 @@ mod tests {
             output_tokens: Some(3),
             approval_wait: Duration::ZERO,
             command_evidence: Vec::new(),
+            test_evidence: Vec::new(),
             observation_trace: Default::default(),
             file_change_approvals_granted: 0,
         };

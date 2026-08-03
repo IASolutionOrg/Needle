@@ -62,8 +62,10 @@ pub(crate) struct AppServerSession {
     broker: ApprovalBroker,
     snapshot_digest: Digest,
     approval_by_item: BTreeMap<String, ApprovalRequest>,
+    test_plan_by_item: BTreeMap<String, Digest>,
     captured_command_items: BTreeSet<String>,
     command_evidence: Vec<CommandExecutionEvidence>,
+    test_evidence: Vec<CapturedTestEvidence>,
     observed_files: BTreeSet<String>,
     trace_gaps: BTreeSet<String>,
     pending_approval_mode: PendingApprovalMode,
@@ -81,8 +83,15 @@ pub(crate) struct AppServerTurn {
     pub(crate) output_tokens: Option<u64>,
     pub(crate) approval_wait: Duration,
     pub(crate) command_evidence: Vec<CommandExecutionEvidence>,
+    pub(crate) test_evidence: Vec<CapturedTestEvidence>,
     pub(crate) observation_trace: WorkerObservationTrace,
     pub(crate) file_change_approvals_granted: u8,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CapturedTestEvidence {
+    pub(crate) plan_digest: Digest,
+    pub(crate) evidence: CommandExecutionEvidence,
 }
 
 pub(crate) struct AppServerTurnFailure {
@@ -147,6 +156,7 @@ impl AppServerSession {
             repository_id,
             route,
             test_plan,
+            None,
             trusted_test_execution,
             trusted_test_execution,
             store,
@@ -179,6 +189,7 @@ impl AppServerSession {
             repository_id,
             "prepare.change",
             None,
+            None,
             false,
             true,
             store,
@@ -197,7 +208,7 @@ impl AppServerSession {
         temp_root: &Path,
         snapshot_digest: Digest,
         repository_id: Digest,
-        test_plan: Option<TestPlan>,
+        test_plans: Vec<TestPlan>,
         trusted_test_execution: bool,
         store: RuntimeStore,
     ) -> Result<Self, String> {
@@ -212,7 +223,8 @@ impl AppServerSession {
             snapshot_digest,
             repository_id,
             "verify.change",
-            test_plan,
+            None,
+            Some(test_plans),
             trusted_test_execution,
             true,
             store,
@@ -234,6 +246,7 @@ impl AppServerSession {
         repository_id: Digest,
         route: &str,
         test_plan: Option<TestPlan>,
+        verifier_test_plans: Option<Vec<TestPlan>>,
         trusted_test_execution: bool,
         read_only_commands_allowed: bool,
         store: RuntimeStore,
@@ -244,15 +257,21 @@ impl AppServerSession {
             worker_process_environment(
                 target_root,
                 temp_root,
-                test_plan.as_ref(),
+                verifier_test_plans
+                    .as_deref()
+                    .and_then(|plans| plans.first())
+                    .or(test_plan.as_ref()),
                 trusted_test_execution,
             );
         if let Some(codex_home) = codex_home {
             process_environment
                 .insert("CODEX_HOME".to_owned(), codex_home.to_string_lossy().into_owned());
         }
-        let developer_instructions =
-            worker_developer_instructions(instructions, test_plan.as_ref(), &test_execution);
+        let developer_instructions = worker_developer_instructions(
+            instructions,
+            verifier_test_plans.as_deref().and_then(|plans| plans.first()).or(test_plan.as_ref()),
+            &test_execution,
+        );
         let mut command = app_server_command(config, &process_environment, worker_process);
         let mut child =
             command.spawn().map_err(|error| format!("cannot spawn Codex App Server: {error}"))?;
@@ -296,14 +315,19 @@ impl AppServerSession {
             target_root: target_root.to_path_buf(),
             temp_root: temp_root.to_path_buf(),
             test_plan,
+            verifier_test_plans: verifier_test_plans.clone(),
             test_execution_available: test_execution.available,
         };
+        let mut test_policy = TestCommandPolicy::cargo_test(repository_id);
+        if let Some(plans) = verifier_test_plans.as_ref() {
+            test_policy.maximum_executions_per_worker = plans.len().try_into().unwrap_or(u32::MAX);
+        }
         let broker = ApprovalBroker::new(
-            test_execution
-                .available
-                .then(|| TestCommandPolicy::cargo_test(repository_id))
-                .into_iter()
-                .collect(),
+            (test_execution.available
+                && verifier_test_plans.as_ref().is_none_or(|plans| !plans.is_empty()))
+            .then_some(test_policy)
+            .into_iter()
+            .collect(),
         )
         .with_read_only_policies(
             read_only_commands_allowed
@@ -325,8 +349,10 @@ impl AppServerSession {
             broker,
             snapshot_digest,
             approval_by_item: BTreeMap::new(),
+            test_plan_by_item: BTreeMap::new(),
             captured_command_items: BTreeSet::new(),
             command_evidence: Vec::new(),
+            test_evidence: Vec::new(),
             observed_files: BTreeSet::new(),
             trace_gaps: BTreeSet::new(),
             pending_approval_mode: PendingApprovalMode::WaitForWebDecision,
@@ -608,6 +634,7 @@ impl AppServerSession {
             output_tokens,
             approval_wait,
             command_evidence: std::mem::take(&mut self.command_evidence),
+            test_evidence: std::mem::take(&mut self.test_evidence),
             observation_trace: WorkerObservationTrace {
                 observed_files: std::mem::take(&mut self.observed_files).into_iter().collect(),
                 gaps: std::mem::take(&mut self.trace_gaps).into_iter().collect(),
@@ -751,7 +778,11 @@ impl AppServerSession {
                 )
             });
         self.respond_decision(&request, decision)?;
-        self.approval_by_item.insert(item_id, request);
+        let test_plan_digest = self.test_plan_digest_for_approval(&request);
+        self.approval_by_item.insert(item_id.clone(), request);
+        if let Some(plan_digest) = test_plan_digest {
+            self.test_plan_by_item.insert(item_id, plan_digest);
+        }
         if let Some(rejection) = rejection {
             return Err(rejection);
         }
@@ -785,6 +816,50 @@ impl AppServerSession {
         self.respond(&event, json!({"decision": decision}))
     }
 
+    fn test_plan_digest_for_approval(&self, approval: &ApprovalRequest) -> Option<Digest> {
+        if !matches!(approval.classification, CommandClassification::AutoApprovedTest { .. }) {
+            return None;
+        }
+        let matches = |plan: &TestPlan| {
+            approval.argv == plan.argv
+                && same_canonical_path(
+                    Path::new(&approval.cwd),
+                    &self.approval_context.checkout_root.join(&plan.cwd_relative),
+                )
+        };
+        if let Some(plans) = self.approval_context.verifier_test_plans.as_ref() {
+            return plans
+                .iter()
+                .filter(|plan| matches(plan))
+                .find(|plan| {
+                    let digest = plan.identity_digest();
+                    !self.test_plan_by_item.values().any(|used| *used == digest)
+                })
+                .map(TestPlan::identity_digest);
+        }
+        self.approval_context
+            .test_plan
+            .as_ref()
+            .filter(|plan| matches(plan))
+            .map(TestPlan::identity_digest)
+    }
+
+    fn expected_test_plan_for_item(&self, item_id: &str) -> Option<(Digest, TestPlan)> {
+        let digest = *self.test_plan_by_item.get(item_id)?;
+        self.approval_context
+            .verifier_test_plans
+            .as_ref()
+            .and_then(|plans| plans.iter().find(|plan| plan.identity_digest() == digest))
+            .or_else(|| {
+                self.approval_context
+                    .test_plan
+                    .as_ref()
+                    .filter(|plan| plan.identity_digest() == digest)
+            })
+            .cloned()
+            .map(|plan| (digest, plan))
+    }
+
     fn capture_command_evidence(&mut self, item: &Value) -> Result<(), String> {
         let Some(item_id) = item.get("id").and_then(Value::as_str) else {
             return Ok(());
@@ -799,12 +874,9 @@ impl AppServerSession {
         let duration_ms = item.get("durationMs").and_then(Value::as_u64).unwrap_or_default();
         let exit_status =
             item.get("exitCode").and_then(Value::as_i64).and_then(|value| value.try_into().ok());
+        let expected_plan = self.expected_test_plan_for_item(item_id);
         let expected_test_identifier =
-            if matches!(approval.classification, CommandClassification::AutoApprovedTest { .. }) {
-                self.approval_context.test_plan.as_ref().map(|plan| plan.test_identifier.as_str())
-            } else {
-                None
-            };
+            expected_plan.as_ref().map(|(_, plan)| plan.test_identifier.as_str());
         let mut evidence = command_evidence_from_output(
             approval,
             self.snapshot_digest,
@@ -826,19 +898,27 @@ impl AppServerSession {
         }
         self.store.record_command_evidence(None, &evidence).map_err(|error| error.to_string())?;
         self.captured_command_items.insert(item_id.to_owned());
+        if let Some((plan_digest, _)) = expected_plan {
+            self.test_evidence
+                .push(CapturedTestEvidence { plan_digest, evidence: evidence.clone() });
+            if self.approval_context.verifier_test_plans.is_some()
+                && !self.broker.complete_verifier_plan(plan_digest)
+            {
+                return Err("verifier test completion did not match the in-flight plan".to_owned());
+            }
+        }
         self.command_evidence.push(evidence);
         Ok(())
     }
 
     fn capture_command_trace(&mut self, item: &Value) {
-        let declared_test = item
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(|item_id| self.approval_by_item.get(item_id))
-            .zip(self.approval_context.test_plan.as_ref())
-            .is_some_and(|(approval, plan)| {
-                validated_declared_test_command(item, &approval.argv, &plan.argv)
-            });
+        let declared_test = item.get("id").and_then(Value::as_str).and_then(|item_id| {
+            self.approval_by_item.get(item_id).zip(self.expected_test_plan_for_item(item_id)).map(
+                |(approval, (_, plan))| {
+                    validated_declared_test_command(item, &approval.argv, &plan.argv)
+                },
+            )
+        }) == Some(true);
         if declared_test {
             // Command evidence validates the declared test separately. It is
             // not repository discovery and must not downgrade artifact scope.
@@ -1624,6 +1704,13 @@ fn validated_declared_test_command(
     declared_argv: &[String],
 ) -> bool {
     approval_argv == declared_argv && validated_command_argv(item, declared_argv) == declared_argv
+}
+
+fn same_canonical_path(left: &Path, right: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(left), std::fs::canonicalize(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 fn now_ms() -> u64 {
