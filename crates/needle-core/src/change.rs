@@ -309,6 +309,13 @@ pub struct VerificationPlanResult {
     pub failure_reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VerificationTestProjection<'a> {
+    pub evidence_ids: &'a [String],
+    pub plan_results: &'a [VerificationPlanResult],
+    pub plans_over_cap: bool,
+}
+
 impl VerificationArtifact {
     pub fn compute_id(
         change_id: &ChangeId,
@@ -381,34 +388,14 @@ impl VerificationArtifact {
         verdict: VerificationStatus,
         acceptance_coverage: &[AcceptanceCoverage],
         findings: &[String],
-        test_evidence_ids: &[String],
-        test_plan_results: &[VerificationPlanResult],
+        test_projection: VerificationTestProjection<'_>,
         verifier_definition: Digest,
     ) -> VerificationArtifactId {
-        Self::compute_id_with_plan_results_and_cap(
-            change_id,
-            patch_id,
-            verdict,
-            acceptance_coverage,
-            findings,
-            test_evidence_ids,
-            test_plan_results,
-            false,
-            verifier_definition,
-        )
-    }
-
-    pub fn compute_id_with_plan_results_and_cap(
-        change_id: &ChangeId,
-        patch_id: PatchId,
-        verdict: VerificationStatus,
-        acceptance_coverage: &[AcceptanceCoverage],
-        findings: &[String],
-        test_evidence_ids: &[String],
-        test_plan_results: &[VerificationPlanResult],
-        test_plans_over_cap: bool,
-        verifier_definition: Digest,
-    ) -> VerificationArtifactId {
+        let VerificationTestProjection {
+            evidence_ids: test_evidence_ids,
+            plan_results: test_plan_results,
+            plans_over_cap: test_plans_over_cap,
+        } = test_projection;
         if test_plan_results.is_empty() && !test_plans_over_cap {
             // Preserve the v1 identity calculation for legacy artifacts and
             // for inconclusive records that have no expected plan.
@@ -498,15 +485,17 @@ impl VerificationArtifact {
                 self.verifier_definition,
             )
         } else {
-            Self::compute_id_with_plan_results_and_cap(
+            Self::compute_id_with_plan_results(
                 &self.change_id,
                 self.patch_id,
                 self.verdict,
                 &self.acceptance_coverage,
                 &self.findings,
-                &self.test_evidence_ids,
-                &self.test_plan_results,
-                self.test_plans_over_cap,
+                VerificationTestProjection {
+                    evidence_ids: &self.test_evidence_ids,
+                    plan_results: &self.test_plan_results,
+                    plans_over_cap: self.test_plans_over_cap,
+                },
                 self.verifier_definition,
             )
         };
@@ -661,15 +650,17 @@ mod tests {
         let change_id = ChangeId::from_digest(Digest::blake3("change-v2-projection"));
         let patch_id = PatchId(Digest::blake3("patch-v2-projection"));
         let verifier_definition = Digest::blake3("definition-v2-projection");
-        let id = VerificationArtifact::compute_id_with_plan_results_and_cap(
+        let id = VerificationArtifact::compute_id_with_plan_results(
             &change_id,
             patch_id,
             verdict,
             &[],
             &findings,
-            &test_evidence_ids,
-            &test_plan_results,
-            test_plans_over_cap,
+            VerificationTestProjection {
+                evidence_ids: &test_evidence_ids,
+                plan_results: &test_plan_results,
+                plans_over_cap: test_plans_over_cap,
+            },
             verifier_definition,
         );
         VerificationArtifact {
@@ -753,15 +744,17 @@ mod tests {
         let acceptance_coverage = Vec::new();
         let findings = vec!["the verifier test-plan bound was exceeded".to_owned()];
         let test_evidence_ids = vec!["evidence-that-must-not-be-retained".to_owned()];
-        let id = VerificationArtifact::compute_id_with_plan_results_and_cap(
+        let id = VerificationArtifact::compute_id_with_plan_results(
             &change_id,
             patch_id,
             verdict,
             &acceptance_coverage,
             &findings,
-            &test_evidence_ids,
-            &[],
-            true,
+            VerificationTestProjection {
+                evidence_ids: &test_evidence_ids,
+                plan_results: &[],
+                plans_over_cap: true,
+            },
             verifier_definition,
         );
         let artifact = VerificationArtifact {

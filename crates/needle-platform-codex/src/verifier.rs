@@ -6,7 +6,7 @@ use needle_core::claim::ClaimPayload;
 use needle_core::{
     AcceptanceCoverage, AcceptanceStatus, ChangeId, Digest, MAX_VERIFIER_TEST_PLANS, PatchArtifact,
     SemanticWorkerArtifact, TestPlan, VerificationArtifact, VerificationPlanResult,
-    VerificationStatus, WorkerConfig,
+    VerificationStatus, VerificationTestProjection, WorkerConfig,
 };
 use needle_runtime::{
     IsolatedCheckout, RuntimeStore, artifact_and_certificate_are_fresh, capture_git_snapshot,
@@ -157,15 +157,15 @@ impl CodexVerifier {
                     Some("the repository is not trusted for test execution".to_owned());
             }
         }
-        let executable_plans = (!associated.over_cap && settings.trusted_test_execution)
-            .then(|| {
-                associated_plans
-                    .iter()
-                    .filter(|entry| entry.available)
-                    .map(|entry| entry.plan.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let executable_plans = if !associated.over_cap && settings.trusted_test_execution {
+            associated_plans
+                .iter()
+                .filter(|entry| entry.available)
+                .map(|entry| entry.plan.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let instructions = verifier_instructions(
             &associated_plans,
             associated.expected,
@@ -212,22 +212,24 @@ impl CodexVerifier {
                 None => reason,
             });
         }
-        let (
+        let NormalizedVerifierTurn {
             declared,
             input_tokens,
             cached_input_tokens,
             output_tokens,
             evidence_ids,
             plan_results,
-        ) = normalize_verifier_turn(
+        } = normalize_verifier_turn(
             turn,
-            &prepared.request.acceptance_criteria,
-            &associated_plans,
-            associated.expected,
-            associated.over_cap,
-            unavailable_reason.as_deref(),
-            sandbox.checkout_root(),
-            patched_snapshot.source_digest,
+            NormalizeVerifierContext {
+                requested_criteria: &prepared.request.acceptance_criteria,
+                plans: &associated_plans,
+                test_expected: associated.expected,
+                over_cap: associated.over_cap,
+                unavailable_reason: unavailable_reason.as_deref(),
+                checkout_root: sandbox.checkout_root(),
+                snapshot_digest: patched_snapshot.source_digest,
+            },
         );
         if let Err(error) = session.cleanup() {
             return cleanup_sandbox_after_error(
@@ -250,15 +252,17 @@ impl CodexVerifier {
         }
         let created_unix_ms = now_ms();
         let artifact = VerificationArtifact {
-            id: VerificationArtifact::compute_id_with_plan_results_and_cap(
+            id: VerificationArtifact::compute_id_with_plan_results(
                 change_id,
                 prepared.patch.id,
                 declared.verdict,
                 &declared.acceptance_coverage,
                 &declared.findings,
-                &evidence_ids,
-                &plan_results,
-                associated.over_cap,
+                VerificationTestProjection {
+                    evidence_ids: &evidence_ids,
+                    plan_results: &plan_results,
+                    plans_over_cap: associated.over_cap,
+                },
                 definition,
             ),
             change_id: change_id.clone(),
@@ -559,23 +563,38 @@ struct DeclaredVerification {
     findings: Vec<String>,
 }
 
-fn normalize_verifier_turn(
-    turn: Result<AppServerTurn, AppServerTurnFailure>,
-    requested_criteria: &[String],
-    plans: &[AssociatedPlan],
+struct NormalizeVerifierContext<'a> {
+    requested_criteria: &'a [String],
+    plans: &'a [AssociatedPlan],
     test_expected: bool,
     over_cap: bool,
-    unavailable_reason: Option<&str>,
-    checkout_root: &Path,
+    unavailable_reason: Option<&'a str>,
+    checkout_root: &'a Path,
     snapshot_digest: Digest,
-) -> (
-    DeclaredVerification,
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-    Vec<String>,
-    Vec<VerificationPlanResult>,
-) {
+}
+
+struct NormalizedVerifierTurn {
+    declared: DeclaredVerification,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    evidence_ids: Vec<String>,
+    plan_results: Vec<VerificationPlanResult>,
+}
+
+fn normalize_verifier_turn(
+    turn: Result<AppServerTurn, AppServerTurnFailure>,
+    context: NormalizeVerifierContext<'_>,
+) -> NormalizedVerifierTurn {
+    let NormalizeVerifierContext {
+        requested_criteria,
+        plans,
+        test_expected,
+        over_cap,
+        unavailable_reason,
+        checkout_root,
+        snapshot_digest,
+    } = context;
     let turn = match turn {
         Ok(turn) => turn,
         Err(failure) => {
@@ -596,14 +615,14 @@ fn normalize_verifier_turn(
                     "the verifier test-plan bound was exceeded; no truncated subset was authorized",
                 );
             }
-            return (
+            return NormalizedVerifierTurn {
                 declared,
-                failure.input_tokens,
-                failure.cached_input_tokens,
-                failure.output_tokens,
-                Vec::new(),
+                input_tokens: failure.input_tokens,
+                cached_input_tokens: failure.cached_input_tokens,
+                output_tokens: failure.output_tokens,
+                evidence_ids: Vec::new(),
                 plan_results,
-            );
+            };
         }
     };
     let mut declared = serde_json::from_value::<DeclaredVerification>(turn.response)
@@ -690,14 +709,14 @@ fn normalize_verifier_turn(
             .findings
             .push("verified verdict lacked complete acceptance or observation evidence".to_owned());
     }
-    (
+    NormalizedVerifierTurn {
         declared,
-        turn.input_tokens,
-        turn.cached_input_tokens,
-        turn.output_tokens,
+        input_tokens: turn.input_tokens,
+        cached_input_tokens: turn.cached_input_tokens,
+        output_tokens: turn.output_tokens,
         evidence_ids,
         plan_results,
-    )
+    }
 }
 
 fn append_authoritative_finding(declared: &mut DeclaredVerification, reason: &str) {
@@ -959,6 +978,29 @@ mod tests {
         }
     }
 
+    fn normalize_test_turn<'a>(
+        turn: Result<AppServerTurn, AppServerTurnFailure>,
+        requested_criteria: &'a [String],
+        plans: &'a [AssociatedPlan],
+        test_expected: bool,
+        over_cap: bool,
+        unavailable_reason: Option<&'a str>,
+        snapshot_digest: Digest,
+    ) -> NormalizedVerifierTurn {
+        normalize_verifier_turn(
+            turn,
+            NormalizeVerifierContext {
+                requested_criteria,
+                plans,
+                test_expected,
+                over_cap,
+                unavailable_reason,
+                checkout_root: Path::new("."),
+                snapshot_digest,
+            },
+        )
+    }
+
     fn plan(identifier: &str) -> TestPlan {
         TestPlan {
             runner: "cargo".to_owned(),
@@ -1000,7 +1042,7 @@ mod tests {
 
     #[test]
     fn verified_requires_exact_acceptance_coverage() {
-        let (verification, ..) = normalize_verifier_turn(
+        let verification = normalize_test_turn(
             Ok(turn(json!({
                 "verdict": "verified",
                 "acceptance_coverage": [],
@@ -1011,9 +1053,9 @@ mod tests {
             false,
             false,
             None,
-            Path::new("."),
             Digest::blake3("snapshot"),
-        );
+        )
+        .declared;
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
     }
 
@@ -1033,7 +1075,7 @@ mod tests {
             requires_approval: true,
             execution_evidence_id: None,
         };
-        let (verification, ..) = normalize_verifier_turn(
+        let verification = normalize_test_turn(
             Ok(turn(json!({
                 "verdict": "verified",
                 "acceptance_coverage": [{
@@ -1048,9 +1090,9 @@ mod tests {
             true,
             false,
             None,
-            Path::new("."),
             Digest::blake3("snapshot"),
-        );
+        )
+        .declared;
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(verification.findings.iter().any(|finding| finding.contains("focused test")));
     }
@@ -1088,24 +1130,24 @@ mod tests {
             available: false,
             unavailable_reason: Some("certificate is stale".to_owned()),
         };
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(turn(json!({
-                "verdict": "rejected",
-                "acceptance_coverage": [{
-                    "criterion": "criterion",
-                    "status": "addressed",
-                    "evidence": "static"
-                }],
-                "findings": []
-            }))),
-            &["criterion".to_owned()],
-            &[associated],
-            true,
-            false,
-            Some("certificate is stale"),
-            Path::new("."),
-            Digest::blake3("snapshot"),
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(turn(json!({
+                    "verdict": "rejected",
+                    "acceptance_coverage": [{
+                        "criterion": "criterion",
+                        "status": "addressed",
+                        "evidence": "static"
+                    }],
+                    "findings": []
+                }))),
+                &["criterion".to_owned()],
+                &[associated],
+                true,
+                false,
+                Some("certificate is stale"),
+                Digest::blake3("snapshot"),
+            );
         assert_eq!(verification.verdict, VerificationStatus::Rejected);
         assert!(
             verification.findings.iter().any(|finding| finding.contains("certificate is stale"))
@@ -1132,16 +1174,16 @@ mod tests {
             "findings": []
         }));
         verifier_turn.test_evidence = vec![captured];
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(verifier_turn),
-            &["criterion".to_owned()],
-            &[AssociatedPlan { plan: certified, available: true, unavailable_reason: None }],
-            true,
-            false,
-            None,
-            Path::new("."),
-            snapshot,
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &[AssociatedPlan { plan: certified, available: true, unavailable_reason: None }],
+                true,
+                false,
+                None,
+                snapshot,
+            );
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert_eq!(records.len(), 1);
         assert!(records[0].executed);
@@ -1172,16 +1214,16 @@ mod tests {
             "findings": []
         }));
         verifier_turn.test_evidence = vec![mismatched.clone()];
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(verifier_turn),
-            &["criterion".to_owned()],
-            &associated,
-            true,
-            false,
-            None,
-            Path::new("."),
-            snapshot,
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(
             records[0].failure_reason.as_deref().is_some_and(|reason| reason.contains("snapshot"))
@@ -1201,16 +1243,16 @@ mod tests {
             "findings": []
         }));
         verifier_turn.test_evidence = vec![mismatched];
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(verifier_turn),
-            &["criterion".to_owned()],
-            &associated,
-            true,
-            false,
-            None,
-            Path::new("."),
-            snapshot,
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(
             records[0]
@@ -1230,16 +1272,16 @@ mod tests {
             "findings": []
         }));
         verifier_turn.test_evidence = vec![evidence(&undeclared, "evidence-undeclared", snapshot)];
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(verifier_turn),
-            &["criterion".to_owned()],
-            &associated,
-            true,
-            false,
-            None,
-            Path::new("."),
-            snapshot,
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(verifier_turn),
+                &["criterion".to_owned()],
+                &associated,
+                true,
+                false,
+                None,
+                snapshot,
+            );
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(verification.findings.iter().any(|finding| finding.contains("undeclared plan")));
         assert!(records[0].evidence_id.is_none());
@@ -1262,7 +1304,12 @@ mod tests {
                 .enumerate()
                 .map(|(index, entry)| evidence(&entry.plan, &format!("evidence-{index}"), snapshot))
                 .collect::<Vec<_>>();
-            let (verification, _, _, _, evidence_ids, records) = normalize_verifier_turn(
+            let NormalizedVerifierTurn {
+                declared: verification,
+                evidence_ids,
+                plan_results: records,
+                ..
+            } = normalize_test_turn(
                 Ok({
                     let mut turn = turn(json!({
                         "verdict": "verified",
@@ -1281,7 +1328,6 @@ mod tests {
                 true,
                 false,
                 None,
-                Path::new("."),
                 snapshot,
             );
             assert_eq!(verification.verdict, VerificationStatus::Verified);
@@ -1300,24 +1346,24 @@ mod tests {
                 unavailable_reason: None,
             })
             .collect::<Vec<_>>();
-        let (verification, _, _, _, _, records) = normalize_verifier_turn(
-            Ok(turn(json!({
-                "verdict": "verified",
-                "acceptance_coverage": [{
-                    "criterion": "criterion",
-                    "status": "addressed",
-                    "evidence": "static"
-                }],
-                "findings": []
-            }))),
-            &["criterion".to_owned()],
-            &plans,
-            true,
-            true,
-            Some("5 plans"),
-            Path::new("."),
-            Digest::blake3("snapshot"),
-        );
+        let NormalizedVerifierTurn { declared: verification, plan_results: records, .. } =
+            normalize_test_turn(
+                Ok(turn(json!({
+                    "verdict": "verified",
+                    "acceptance_coverage": [{
+                        "criterion": "criterion",
+                        "status": "addressed",
+                        "evidence": "static"
+                    }],
+                    "findings": []
+                }))),
+                &["criterion".to_owned()],
+                &plans,
+                true,
+                true,
+                Some("5 plans"),
+                Digest::blake3("snapshot"),
+            );
         assert_eq!(verification.verdict, VerificationStatus::Inconclusive);
         assert!(verification.findings.iter().any(|finding| finding.contains("test-plan bound")));
         assert!(records.is_empty());

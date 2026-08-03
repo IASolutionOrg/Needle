@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TEST_COMMAND: &str = "cargo test suite::focused -- --exact";
 const R44_TEST_COMMAND: &str =
@@ -233,7 +233,7 @@ struct PendingApproval {
     file_change: bool,
 }
 
-fn requested_verifier_plans(codex_home: &PathBuf) -> Vec<SimulatorVerifierPlan> {
+fn requested_verifier_plans(codex_home: &Path) -> Vec<SimulatorVerifierPlan> {
     let Ok(value) = fs::read_to_string(codex_home.join(".needle-simulation-verifier-plans")) else {
         return Vec::new();
     };
