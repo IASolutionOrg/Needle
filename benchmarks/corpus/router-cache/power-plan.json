@@ -1,10 +1,10 @@
 {
-  "schema": "needle.power-plan/1",
-  "plan_id": "synthetic-router-cache-v1",
+  "schema": "needle.power-plan/2",
+  "plan_id": "power-plan-1d6bfc9443debec0",
   "manifest_digest": "b3:8be00a443b7e1a57813d8dbe25e6ea22a988f7536bc0f159fee8a58f0fa6cd7a",
-  "campaign_digest": "b3:647300dac4ba3c304b4052a114f1e80b0eb214e278fd4415bbd576c369652864",
-  "calibration_input_digest": "b3:4d27a8427bd3655d59e88c37efadcccfca4a7d82cd4a4324708180aea31289c0",
-  "estimator_revision": "issue-7-structural-v1",
+  "campaign_commitment": "b3:647300dac4ba3c304b4052a114f1e80b0eb214e278fd4415bbd576c369652864",
+  "calibration_input_digest": "b3:1d6bfc9443debec09dab40fdd8b72bd78e6e5e5bf01075def337b31f92c4a104",
+  "estimator_revision": "needle.paired-log-ratio-power/1",
   "alpha_basis_points": 500,
   "target_power_basis_points": 9000,
   "routes": [
@@ -12,21 +12,22 @@
       "route": "locate_implementation",
       "baseline_arm": "frontier_direct",
       "treatment_arm": "needle_miss",
-      "pair_key": "task_id:repetition",
-      "observed_log_ratio_mean": -0.4,
-      "observed_log_ratio_stddev": 0.2,
-      "required_pairs": 1
+      "pair_key": "corpus_digest:campaign_commitment:task_id:route:split:repetition:pair_seed",
+      "observed_log_ratio_mean": -0.4337502838523616,
+      "observed_log_ratio_stddev": 0.10900099103037066,
+      "required_pairs": 3
     },
     {
       "route": "trace_state_flow",
       "baseline_arm": "frontier_direct",
       "treatment_arm": "needle_miss",
-      "pair_key": "task_id:repetition",
-      "observed_log_ratio_mean": -0.4,
-      "observed_log_ratio_stddev": 0.2,
-      "required_pairs": 1
+      "pair_key": "corpus_digest:campaign_commitment:task_id:route:split:repetition:pair_seed",
+      "observed_log_ratio_mean": -0.4337502838523616,
+      "observed_log_ratio_stddev": 0.10900099103037066,
+      "required_pairs": 3
     }
   ],
   "validated": true,
-  "synthetic": true
+  "synthetic": true,
+  "artifact_digest": "b3:88cadb0c43e0ac1a39566f5c76fa1a64949b2ab88bdb592aaaafc76b897b22fa"
 }

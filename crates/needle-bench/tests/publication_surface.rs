@@ -1,6 +1,8 @@
 use needle_bench::{
-    ArmLaunch, CorpusSchedule, FrozenCorpusManifest, PowerPlan, SealedOracleIndex,
-    build_launch_plan, corpus_digest, raw_digest, validate_sealed_bundle,
+    ArmLaunch, BootstrapConfig, CalibrationObservation, CorpusSchedule, FinalGateContract,
+    FinalObservation, FrozenCorpusManifest, MultiTaskCampaign, PowerPlan, SealedOracleIndex,
+    build_launch_plan, campaign_commitment, corpus_digest, evaluate_final_gate, plan_power,
+    raw_digest, validate_sealed_bundle,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -190,6 +192,19 @@ fn public_v4_fixture_is_answer_free_and_exactly_committed() {
         serde_json::from_slice(&fs::read(root.join("schedule.json")).unwrap()).unwrap();
     let plan: PowerPlan =
         serde_json::from_slice(&fs::read(root.join("power-plan.json")).unwrap()).unwrap();
+    let campaign: MultiTaskCampaign =
+        serde_json::from_slice(&fs::read(root.join("campaign.json")).unwrap()).unwrap();
+    let campaign_digest = raw_digest(&fs::read(root.join("campaign.json")).unwrap());
+    let calibration = fs::read_to_string(root.join("synthetic-calibration-observations.jsonl"))
+        .unwrap()
+        .lines()
+        .map(serde_json::from_str::<CalibrationObservation>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(plan.campaign_commitment, campaign_commitment(&campaign));
+    let reproduced = plan_power(&manifest, &campaign, &calibration);
+    assert!(reproduced.failures.is_empty(), "{:?}", reproduced.failures);
+    assert_eq!(reproduced.plan.as_ref(), Some(&plan));
     let plan_digest = raw_digest(&fs::read(root.join("power-plan.json")).unwrap());
     let schedule_digest = raw_digest(&fs::read(root.join("schedule.json")).unwrap());
     assert_eq!(plan.manifest_digest, corpus_digest(&manifest));
@@ -199,6 +214,33 @@ fn public_v4_fixture_is_answer_free_and_exactly_committed() {
         build_launch_plan(&manifest, &schedule, &plan, &schedule_digest, &plan_digest).unwrap();
     assert_eq!(launches.len(), schedule.entries.len());
     assert!(launches.iter().all(ArmLaunch::serialization_is_bounded));
+    let final_observations = fs::read_to_string(root.join("synthetic-final-observations.jsonl"))
+        .unwrap()
+        .lines()
+        .map(serde_json::from_str::<FinalObservation>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let final_report = evaluate_final_gate(
+        FinalGateContract {
+            manifest: &manifest,
+            campaign: &campaign,
+            schedule: &schedule,
+            power_plan: &plan,
+            campaign_digest: &campaign_digest,
+            schedule_digest: &schedule_digest,
+            power_plan_digest: &plan_digest,
+        },
+        &final_observations,
+        BootstrapConfig { resamples: 2_000, seed: 42 },
+    );
+    assert!(!final_report.passed);
+    assert!(!final_report.contract_valid);
+    assert!(final_report.validation_failures.iter().any(|failure| failure.contains("synthetic")));
+    assert!(final_report.routes.iter().all(|route| {
+        route.valid_pairs == route.required_pairs.unwrap_or_default()
+            && route.paired_cost_ratio.is_none()
+            && route.bca_95_ci.is_none()
+    }));
     let bundle_root = root.join("synthetic-sealed");
     let bundle = validate_sealed_bundle(
         &manifest,
