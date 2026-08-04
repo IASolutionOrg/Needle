@@ -1,10 +1,14 @@
 use needle_bench::{
-    ArtifactStore, CachePilotArmObservation, CachePilotResolveOutcome, ExperimentArm,
-    ExperimentObservation, ExperimentReport, ExperimentSchedule, FinalObservation,
-    FrozenCorpusManifest, PilotGateResult, PricingSnapshot, ProcessExecutionStatus, ProductArm,
+    ArtifactStore, BootstrapConfig, CachePilotArmObservation, CachePilotResolveOutcome,
+    CalibrationObservation, CorpusSchedule, ExperimentArm, ExperimentObservation, ExperimentReport,
+    ExperimentSchedule, FinalGateContract, FinalObservation, FrozenCorpusManifest,
+    MAX_BOOTSTRAP_RESAMPLES, MAX_CALIBRATION_INPUT_BYTES, MAX_CORPUS_MANIFEST_BYTES,
+    MAX_FINAL_OBSERVATION_BYTES, MAX_SCHEDULE_BYTES, MIN_BOOTSTRAP_RESAMPLES, MultiTaskCampaign,
+    PilotGateResult, PowerPlan, PricingSnapshot, ProcessExecutionStatus, ProductArm,
     ProductObservation, ProductRunManifest, ProductVerdict, QualityOracleResult, QualityOracleSpec,
     TaskFixture, TokenCost, evaluate_cache_pilot, evaluate_final_gate, evaluate_mutation_pilot,
-    evaluate_pilot_pair, parse_codex_jsonl, parse_jsonl, parse_task_fixture, redact_jsonl,
+    evaluate_pilot_pair, parse_codex_jsonl, parse_jsonl, parse_task_fixture, plan_power,
+    raw_digest, read_bounded_file, redact_jsonl, validate_frozen_manifest,
 };
 use needle_core::{
     CodexHost, CodexRole, CommandPolicy, Digest, EvidenceFailurePolicy, FORMAT_REVISION,
@@ -757,10 +761,11 @@ fn run_experiment(arguments: Vec<String>) -> Result<(), AppError> {
         "cache-pilot" => product_cache_pilot_run(&arguments[1..]),
         "cache-pilot-report" => cache_pilot_report(&arguments[1..]),
         "product-report" => product_report(&arguments[1..]),
+        "power-plan" => power_plan_report(&arguments[1..]),
         "final-report" => final_gate_report(&arguments[1..]),
         "report" => experiment_report(&arguments[1..]),
         _ => Err(AppError::Usage(
-            "experiment run|transport-preflight|mcp-live|partial-tests-live|mcp-contract-microbench|minimal-pilot-live|quality-oracle-replay|artifact-cache-main-replay|worker-diagnostic-live|pilot|cache-pilot|cache-pilot-report|report|product-report|final-report"
+            "experiment run|transport-preflight|mcp-live|partial-tests-live|mcp-contract-microbench|minimal-pilot-live|quality-oracle-replay|artifact-cache-main-replay|worker-diagnostic-live|pilot|cache-pilot|cache-pilot-report|report|product-report|power-plan|final-report"
                 .to_owned(),
         )),
     }
@@ -3576,35 +3581,124 @@ fn final_gate_report(arguments: &[String]) -> Result<(), AppError> {
                 .to_owned(),
         ));
     };
-    let corpus_path = required_value(arguments, "--corpus")?;
-    let manifest = serde_json::from_slice::<FrozenCorpusManifest>(&fs::read(corpus_path)?)
-        .map_err(|error| {
+    let corpus_path = PathBuf::from(required_value(arguments, "--corpus")?);
+    let manifest_bytes = read_bounded_file(&corpus_path, MAX_CORPUS_MANIFEST_BYTES)?;
+    let manifest =
+        serde_json::from_slice::<FrozenCorpusManifest>(&manifest_bytes).map_err(|error| {
             AppError::Experiment(format!("invalid frozen corpus manifest: {error}"))
         })?;
+    let manifest_errors = validate_frozen_manifest(&manifest);
+    if !manifest_errors.is_empty() {
+        return Err(AppError::Experiment(format!(
+            "frozen corpus manifest is invalid: {}",
+            manifest_errors.join("; ")
+        )));
+    }
+    let corpus_root = corpus_path.parent().unwrap_or_else(|| Path::new("."));
+    let campaign_path = manifest
+        .campaign_path
+        .as_deref()
+        .ok_or_else(|| AppError::Experiment("frozen corpus has no campaign path".to_owned()))?;
+    let schedule_path = manifest
+        .schedule_path
+        .as_deref()
+        .ok_or_else(|| AppError::Experiment("frozen corpus has no schedule path".to_owned()))?;
+    let power_plan_path = manifest
+        .power_plan_path
+        .as_deref()
+        .ok_or_else(|| AppError::Experiment("frozen corpus has no power-plan path".to_owned()))?;
+    let campaign_bytes =
+        read_bounded_file(&corpus_root.join(campaign_path), MAX_CORPUS_MANIFEST_BYTES)?;
+    let schedule_bytes = read_bounded_file(&corpus_root.join(schedule_path), MAX_SCHEDULE_BYTES)?;
+    let power_plan_bytes =
+        read_bounded_file(&corpus_root.join(power_plan_path), MAX_SCHEDULE_BYTES)?;
+    let campaign = serde_json::from_slice::<MultiTaskCampaign>(&campaign_bytes)
+        .map_err(|error| AppError::Experiment(format!("invalid campaign: {error}")))?;
+    let schedule = serde_json::from_slice::<CorpusSchedule>(&schedule_bytes)
+        .map_err(|error| AppError::Experiment(format!("invalid corpus schedule: {error}")))?;
+    let power_plan = serde_json::from_slice::<PowerPlan>(&power_plan_bytes)
+        .map_err(|error| AppError::Experiment(format!("invalid power plan: {error}")))?;
+    let campaign_digest = raw_digest(&campaign_bytes);
+    let schedule_digest = raw_digest(&schedule_bytes);
+    let power_plan_digest = raw_digest(&power_plan_bytes);
     let resamples = option_value(arguments, "--bootstrap-resamples")
         .map(|value| value.parse::<usize>())
         .transpose()
         .map_err(|error| AppError::Usage(format!("invalid bootstrap resample count: {error}")))?
         .unwrap_or(10_000);
-    if resamples < 1_000 {
-        return Err(AppError::Usage("--bootstrap-resamples must be at least 1000".to_owned()));
+    if !(MIN_BOOTSTRAP_RESAMPLES..=MAX_BOOTSTRAP_RESAMPLES).contains(&resamples) {
+        return Err(AppError::Usage(
+            "--bootstrap-resamples must be between 1000 and 1000000".to_owned(),
+        ));
     }
     let seed = option_value(arguments, "--seed")
         .map(|value| value.parse::<u64>())
         .transpose()
         .map_err(|error| AppError::Usage(format!("invalid bootstrap seed: {error}")))?
         .unwrap_or(42);
-    let observations = fs::read_to_string(input)?
+    let observation_bytes = read_bounded_file(Path::new(input), MAX_FINAL_OBSERVATION_BYTES)?;
+    let observation_text = String::from_utf8(observation_bytes).map_err(|error| {
+        AppError::Experiment(format!("final observations are not UTF-8: {error}"))
+    })?;
+    let observations = observation_text
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(serde_json::from_str::<FinalObservation>)
         .collect::<Result<Vec<_>, _>>()?;
     let rendered = serde_json::to_string_pretty(&evaluate_final_gate(
-        &manifest,
+        FinalGateContract {
+            manifest: &manifest,
+            campaign: &campaign,
+            schedule: &schedule,
+            power_plan: &power_plan,
+            campaign_digest: &campaign_digest,
+            schedule_digest: &schedule_digest,
+            power_plan_digest: &power_plan_digest,
+        },
         &observations,
-        resamples,
-        seed,
+        BootstrapConfig { resamples, seed },
     ))?;
+    if let Some(path) = option_value(arguments, "--output") {
+        fs::write(path, rendered)?;
+    } else {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+fn power_plan_report(arguments: &[String]) -> Result<(), AppError> {
+    let Some(input) = arguments.first() else {
+        return Err(AppError::Usage(
+            "experiment power-plan <calibration-observations.jsonl> --corpus <frozen-corpus.json> --campaign <campaign.json> [--output path]"
+                .to_owned(),
+        ));
+    };
+    let corpus_path = PathBuf::from(required_value(arguments, "--corpus")?);
+    let campaign_path = PathBuf::from(required_value(arguments, "--campaign")?);
+    let manifest_bytes = read_bounded_file(&corpus_path, MAX_CORPUS_MANIFEST_BYTES)?;
+    let manifest =
+        serde_json::from_slice::<FrozenCorpusManifest>(&manifest_bytes).map_err(|error| {
+            AppError::Experiment(format!("invalid frozen corpus manifest: {error}"))
+        })?;
+    let campaign_bytes = read_bounded_file(&campaign_path, MAX_CORPUS_MANIFEST_BYTES)?;
+    if manifest.campaign_digest.as_deref() != Some(raw_digest(&campaign_bytes).as_str()) {
+        return Err(AppError::Experiment(
+            "campaign bytes differ from the frozen manifest".to_owned(),
+        ));
+    }
+    let campaign = serde_json::from_slice::<MultiTaskCampaign>(&campaign_bytes)
+        .map_err(|error| AppError::Experiment(format!("invalid campaign: {error}")))?;
+    let observation_bytes = read_bounded_file(Path::new(input), MAX_CALIBRATION_INPUT_BYTES)?;
+    let observation_text = String::from_utf8(observation_bytes).map_err(|error| {
+        AppError::Experiment(format!("calibration observations are not UTF-8: {error}"))
+    })?;
+    let observations = observation_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<CalibrationObservation>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = plan_power(&manifest, &campaign, &observations);
+    let rendered = serde_json::to_string_pretty(&report)?;
     if let Some(path) = option_value(arguments, "--output") {
         fs::write(path, rendered)?;
     } else {

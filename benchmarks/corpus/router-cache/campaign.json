@@ -1,6 +1,7 @@
 {
   "schema": "needle.multi-task-campaign/2",
-  "schedule_digest": "b3:c853b4ed84d8e9119013d788a7c769c63fd77f63a947706fbe4c128b65ed51d5",
+  "schedule_digest": "b3:3ae9b089ba4c7bee7b58ad562a5797872377ef2d986fba30d75651cc567210dd",
+  "task_ids": [],
   "paid_arms": [
     "frontier_direct",
     "needle_miss"
@@ -15,6 +16,7 @@
     "native_subagent",
     "escalation"
   ],
+  "repetitions_per_task": 0,
   "automatic_retries": false,
   "statistical_claim": false,
   "bootstrap_resamples": 10000,

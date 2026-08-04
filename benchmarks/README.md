@@ -72,6 +72,10 @@ maintainers; no external bundle path is present in public manifests or arm
 launch projections. A real sealed bundle and validated production PowerPlan
 are absent from this checkout, so offline preflight remains fail-closed. The
 synthetic bundle is complete for evaluator tests but cannot enable a provider
-run. A future caller must keep private evaluator material unmounted and
-inaccessible to the runner identity; this protocol does not claim ACL or
-process-isolation proof.
+run. `router-cache/synthetic-calibration-observations.jsonl` deterministically
+reproduces the checked-in synthetic PowerPlan, while
+`router-cache/synthetic-final-observations.jsonl` exercises the exact paired
+holdout contract and its fail-closed synthetic boundary. None of these
+artifacts is economic evidence. A future caller must keep private evaluator
+material unmounted and inaccessible to the runner identity; this protocol does
+not claim ACL or process-isolation proof.
