@@ -81,8 +81,10 @@ Every parent transition persists its projection and event atomically. Patch and
 verification artifacts must already exist, so a crash before their parent
 transition leaves the phase unchanged; repair and apply lifecycle transitions
 are atomic with their change-journal mutation. Restart replay must equal the
-stored projection. This is an offline runtime contract. It does not wire Codex
-worker processes or add a lifecycle HTTP/UI surface.
+stored projection. Runtime's parent-owned kernel selects one validated phase,
+invokes one injected depth-one adapter with a deterministic invocation identity,
+and commits through digest CAS. It stops at `apply/awaiting_approval`. Concrete
+Codex worker processes and a lifecycle HTTP/UI surface remain unwired.
 
 ## One repair
 

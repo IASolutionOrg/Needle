@@ -106,9 +106,14 @@ state, and compare-and-swap state digests serialize concurrent transitions.
 Lifecycle apply additionally requires an explicit user approval bound to the
 current patch, verification, and lifecycle digest.
 
-This layer is the durable orchestration contract, not the Codex lifecycle
-executor or read UI. Those consumers remain separate and must use the typed
-parent operations rather than receiving direct store capability.
+Runtime adds a parent-owned execution kernel over this durable contract. The
+kernel replays the projection, selects one active phase, invokes one injected
+adapter with bounded request/result contracts, and alone commits the typed
+transition through digest CAS. Deterministic invocation identities let adapters
+deduplicate side effects after an uncommitted attempt; replay prevents a
+committed phase from running again. The kernel consumes the one transactional
+repair reservation and stops at `apply/awaiting_approval`. Concrete Codex
+process adapters and the lifecycle read UI remain separate consumers.
 
 ## Request flow
 

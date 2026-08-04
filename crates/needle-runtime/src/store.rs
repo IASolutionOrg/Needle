@@ -30,7 +30,9 @@ mod lifecycles;
 #[path = "store/role_profiles.rs"]
 mod role_profiles;
 
-pub use changes::{ChangeAttemptRecord, PatchFileBlob, PreparedChangeRecord};
+pub use changes::{
+    ChangeAttemptRecord, LifecycleChangeContext, PatchFileBlob, PreparedChangeRecord,
+};
 pub use lifecycles::LifecycleProjection;
 pub use role_profiles::{
     RoleProfileAuditOperation, RoleProfileAuditRecord, RoleProfileStateRecord,
