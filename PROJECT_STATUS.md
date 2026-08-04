@@ -140,7 +140,13 @@ validation.
   OpenCode, and Antigravity configuration and execution are unsupported.
 - Linux and macOS lack live platform evidence.
 - The accepted economic results are calibrations, not a powered corpus or
-  general savings claim.
+  general savings claim. The public v4 benchmark manifest is answer-free and
+  synthetic; the offline protocol and synthetic evaluator fixture are complete,
+  but real private material, a non-synthetic validated PowerPlan, and a
+  provider run are absent. App provider execution remains fail-closed until an
+  isolated executor/broker consumes only ArmLaunch. This does not prove
+  filesystem ACLs or process isolation; callers must keep private bundles
+  unmounted and inaccessible to the runner identity.
 - No public beta, support channel, or compatibility window exists.
 
 ## Next milestone
@@ -150,8 +156,10 @@ Release readiness requires all of the following:
 1. provider-backed calibration of authoritative claim reuse;
 2. live end-to-end verified-change validation (`prepare_change` -> `verify_change` / patcher-verifier);
 3. a second live platform;
-4. a frozen multi-task corpus with independent oracles;
-5. a powered paired analysis and confidence interval;
+4. a frozen answer-free multi-task corpus bound to maintainer-owned sealed
+   evaluator material;
+5. a validated production PowerPlan, powered paired analysis, and confidence
+   interval;
 6. stable developer packaging and a compatibility policy;
 7. a dedicated security and publication review.
 

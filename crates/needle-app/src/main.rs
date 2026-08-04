@@ -781,13 +781,13 @@ fn mcp_contract_microbench_run(arguments: &[String]) -> Result<(), AppError> {
 }
 
 fn quality_oracle_replay(arguments: &[String]) -> Result<(), AppError> {
-    let manifest = option_value(arguments, "--manifest")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(minimal_live_pilot::protocol::DEFAULT_MANIFEST));
+    let manifest = option_value(arguments, "--manifest").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(minimal_live_pilot::protocol::DEFAULT_LEGACY_OFFLINE_MANIFEST)
+    });
     let task_id = required_value(arguments, "--task-id")?;
     let response_path = PathBuf::from(required_value(arguments, "--response")?);
     let response = fs::read_to_string(&response_path)?;
-    let protocol = minimal_live_pilot::protocol::load_protocol(&manifest)?;
+    let protocol = minimal_live_pilot::protocol::load_legacy_offline_protocol(&manifest)?;
     let (task, oracle) = protocol.campaign_task(&task_id)?;
     let spec = minimal_live_pilot::protocol::quality_spec_for_task(task, oracle)?;
     let quality = needle_bench::QualityOracleResult::evaluate(&spec, &response, None);

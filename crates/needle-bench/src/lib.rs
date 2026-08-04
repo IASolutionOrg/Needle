@@ -6,6 +6,8 @@ mod corpus;
 mod final_gate;
 mod minimal_pilot;
 mod product;
+mod schedule;
+mod sealed_oracle;
 mod shadow_replay;
 
 pub use artifact_cache_replay::*;
@@ -14,6 +16,8 @@ pub use corpus::*;
 pub use final_gate::*;
 pub use minimal_pilot::*;
 pub use product::*;
+pub use schedule::*;
+pub use sealed_oracle::*;
 pub use shadow_replay::*;
 
 use needle_core::{ContinuationEnvelope, Digest, NeedRequest};
@@ -21,9 +25,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+/// Read at most `max_bytes` from an untrusted file without first allocating
+/// the file's full advertised size.  The one-byte over-read distinguishes an
+/// exact-bound file from an oversized file even when metadata changes between
+/// the precheck and the read.
+pub fn read_bounded_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > max_bytes as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file exceeds bounded byte limit"));
+    }
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes as u64) as usize);
+    file.by_ref().take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file exceeds bounded byte limit"));
+    }
+    Ok(bytes)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]

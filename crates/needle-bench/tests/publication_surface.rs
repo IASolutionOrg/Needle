@@ -1,3 +1,7 @@
+use needle_bench::{
+    ArmLaunch, CorpusSchedule, FrozenCorpusManifest, PowerPlan, SealedOracleIndex,
+    build_launch_plan, corpus_digest, raw_digest, validate_sealed_bundle,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -145,4 +149,67 @@ fn assert_evidence_paths_exist(value: &Value, root: &Path) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn public_v4_fixture_is_answer_free_and_exactly_committed() {
+    let root = workspace().join("benchmarks/corpus/router-cache");
+    let manifest_bytes = fs::read(root.join("manifest.json")).expect("manifest");
+    let manifest: FrozenCorpusManifest =
+        serde_json::from_slice(&manifest_bytes).expect("manifest JSON");
+    assert_eq!(manifest.schema, "needle.frozen-corpus/4");
+    assert!(
+        manifest
+            .tasks
+            .iter()
+            .all(|task| task.material_class == needle_bench::CorpusMaterialClass::Synthetic)
+    );
+    assert!(manifest.tasks.iter().any(|task| task.id == "ripgrep-no-ignore-vcs-locate-holdout"));
+    assert!(manifest.tasks.iter().any(|task| task.id == "ripgrep-null-data-trace-holdout"));
+    let manifest_value = serde_json::to_value(&manifest).unwrap();
+    let encoded = manifest_value.to_string();
+    for prohibited in [
+        "oracle_path",
+        "test_identifier",
+        "focused_command",
+        "needles",
+        "expected_symbol",
+        "bundle_location",
+    ] {
+        assert!(!encoded.contains(prohibited), "public manifest leaked {prohibited}");
+    }
+    assert!(
+        manifest.schedule_digest.as_deref()
+            == Some(raw_digest(&fs::read(root.join("schedule.json")).unwrap()).as_str())
+    );
+    assert!(
+        manifest.power_plan_digest.as_deref()
+            == Some(raw_digest(&fs::read(root.join("power-plan.json")).unwrap()).as_str())
+    );
+    let schedule: CorpusSchedule =
+        serde_json::from_slice(&fs::read(root.join("schedule.json")).unwrap()).unwrap();
+    let plan: PowerPlan =
+        serde_json::from_slice(&fs::read(root.join("power-plan.json")).unwrap()).unwrap();
+    let plan_digest = raw_digest(&fs::read(root.join("power-plan.json")).unwrap());
+    let schedule_digest = raw_digest(&fs::read(root.join("schedule.json")).unwrap());
+    assert_eq!(plan.manifest_digest, corpus_digest(&manifest));
+    assert!(plan.validate(&manifest).is_empty());
+    assert!(schedule.validate(&manifest, &plan, &plan_digest).is_empty());
+    let launches =
+        build_launch_plan(&manifest, &schedule, &plan, &schedule_digest, &plan_digest).unwrap();
+    assert_eq!(launches.len(), schedule.entries.len());
+    assert!(launches.iter().all(ArmLaunch::serialization_is_bounded));
+    let bundle_root = root.join("synthetic-sealed");
+    let bundle = validate_sealed_bundle(
+        &manifest,
+        Some(&bundle_root.join("index.json")),
+        Some(&bundle_root),
+    );
+    assert!(bundle.errors.is_empty(), "{:?}", bundle.errors);
+    assert!(!bundle.production_bundle_ready);
+    assert!(!bundle.production_material);
+    let index: SealedOracleIndex =
+        serde_json::from_slice(&fs::read(bundle_root.join("index.json")).unwrap()).unwrap();
+    assert_eq!(index.entries.len(), manifest.tasks.len());
+    assert!(bundle.bundle_root.is_none());
 }

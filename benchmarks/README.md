@@ -11,7 +11,8 @@ savings claim.
 
 ```text
 benchmarks/
-  corpus/router-cache/   frozen tasks, oracles, campaign, and cost model
+  corpus/router-cache/   answer-free manifest, schedule, synthetic plan, campaign, and cost model
+    oracles/             legacy synthetic evaluator fixtures only (not public handles)
   fixtures/              structured protocol and worker fixtures
   results/historical/    accepted observations from an earlier product boundary
   results/live/          accepted provider-backed current-path calibration
@@ -65,4 +66,12 @@ are excluded from published benchmark evidence and do not support benchmark
 claims.
 
 The evidence index records observations; it does not approve or schedule
-provider runs.
+provider runs. Public corpus material is answer-free and synthetic. The
+evaluator-owned sealed oracle index and its bytes are supplied out of band by
+maintainers; no external bundle path is present in public manifests or arm
+launch projections. A real sealed bundle and validated production PowerPlan
+are absent from this checkout, so offline preflight remains fail-closed. The
+synthetic bundle is complete for evaluator tests but cannot enable a provider
+run. A future caller must keep private evaluator material unmounted and
+inaccessible to the runner identity; this protocol does not claim ACL or
+process-isolation proof.

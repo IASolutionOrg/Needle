@@ -34,11 +34,11 @@ mod supervised_main;
 
 use direct_main::{DirectObservation, observe as observe_direct_main};
 use protocol::{
-    DEFAULT_MANIFEST, DEFAULT_PRICING, MULTI_NEED_EXTRA_MAIN_TURN_RESERVES,
-    MULTI_NEED_EXTRA_WORKER_RESERVES, MULTI_NEED_MAIN_TURN_RESERVE_MICROCREDITS,
-    MULTI_NEED_WORKER_RESERVE_MICROCREDITS, Protocol, TRACE_REUSE_TASK_ID,
-    coverage_hit_quality_spec, load_pricing, load_protocol, quality_spec, test_plan,
-    validate_source, workspace_path,
+    DEFAULT_LEGACY_OFFLINE_MANIFEST, DEFAULT_MANIFEST, DEFAULT_PRICING,
+    MULTI_NEED_EXTRA_MAIN_TURN_RESERVES, MULTI_NEED_EXTRA_WORKER_RESERVES,
+    MULTI_NEED_MAIN_TURN_RESERVE_MICROCREDITS, MULTI_NEED_WORKER_RESERVE_MICROCREDITS, Protocol,
+    TRACE_REUSE_TASK_ID, coverage_hit_quality_spec, load_legacy_offline_protocol, load_pricing,
+    load_protocol, quality_spec, test_plan, validate_source, workspace_path,
 };
 use supervised_main::SupervisedMain;
 
@@ -341,13 +341,22 @@ pub(super) fn run(arguments: &[String]) -> Result<(), AppError> {
         ));
     }
 
-    let manifest_path = option_value(arguments, "--corpus")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_path(DEFAULT_MANIFEST));
+    let manifest_path =
+        option_value(arguments, "--corpus").map(PathBuf::from).unwrap_or_else(|| {
+            workspace_path(if execute_offline {
+                DEFAULT_LEGACY_OFFLINE_MANIFEST
+            } else {
+                DEFAULT_MANIFEST
+            })
+        });
     let pricing_path = option_value(arguments, "--pricing-snapshot")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_path(DEFAULT_PRICING));
-    let mut protocol = load_protocol(&manifest_path)?;
+    let mut protocol = if execute_offline {
+        load_legacy_offline_protocol(&manifest_path)?
+    } else {
+        load_protocol(&manifest_path)?
+    };
     if trace_reuse {
         protocol.select_campaign_task(TRACE_REUSE_TASK_ID)?;
     }
@@ -1716,6 +1725,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::protocol::DEFAULT_LEGACY_OFFLINE_MANIFEST;
     use super::*;
     use needle_bench::ProcessExecutionStatus;
 
@@ -1876,7 +1886,8 @@ mod tests {
 
     #[test]
     fn economic_stage_budget_adds_main_only_and_keeps_reserves_explicit() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let budget = protocol.economic_stage_budget().unwrap();
         assert_eq!(budget.main_only_microcredits, 11_158_850);
         assert_eq!(budget.needle_miss_microcredits, 5_311_720);

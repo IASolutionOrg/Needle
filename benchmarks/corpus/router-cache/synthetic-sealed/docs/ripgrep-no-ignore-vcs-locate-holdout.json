@@ -1,0 +1,16 @@
+{
+  "schema": "needle.sealed-oracle/1",
+  "task_id": "ripgrep-no-ignore-vcs-locate-holdout",
+  "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+  "focused_test_policy": {"identity": "ripgrep.synthetic.no-ignore-vcs.v1", "commitment": "b3:ff0c45be0d9ea0e25a4c7a4f6dcac9b153a05b08c7f23d723011e5bf4e58de57"},
+  "focused_test": {"identifier": "feature::f68_no_ignore_vcs", "argv": ["cargo", "test", "--offline", "--test", "integration", "feature::f68_no_ignore_vcs", "--", "--exact"]},
+  "quality": {
+    "required_files": ["crates/core/flags/hiargs.rs"],
+    "required_symbols": ["no_ignore_vcs"],
+    "required_claims": [],
+    "forbidden_claims": [],
+    "focused_test_command": "feature::f68_no_ignore_vcs",
+    "accepted_focused_test_identifiers": ["feature::f68_no_ignore_vcs", "f68_no_ignore_vcs"],
+    "focused_test_required": true
+  }
+}

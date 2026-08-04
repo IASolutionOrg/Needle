@@ -1,20 +1,13 @@
 {
-  "schema": "needle.multi-task-campaign/2",
-  "schedule_digest": "b3:c853b4ed84d8e9119013d788a7c769c63fd77f63a947706fbe4c128b65ed51d5",
-  "paid_arms": [
-    "frontier_direct",
-    "needle_miss"
+  "schema": "needle.multi-task-campaign/1",
+  "task_ids": [
+    "ripgrep-glob-case-insensitive-locate-calibration",
+    "ripgrep-crlf-trace-calibration"
   ],
-  "offline_cache_arms": [
-    "exact_hit",
-    "partial_hit",
-    "irrelevant_mutation",
-    "relevant_mutation"
-  ],
-  "deferred_diagnostic_arms": [
-    "native_subagent",
-    "escalation"
-  ],
+  "paid_arms": ["frontier_direct", "needle_miss"],
+  "offline_cache_arms": ["exact_hit", "partial_hit", "irrelevant_mutation", "relevant_mutation"],
+  "deferred_diagnostic_arms": ["native_subagent", "escalation"],
+  "repetitions_per_task": 1,
   "automatic_retries": false,
   "statistical_claim": false,
   "bootstrap_resamples": 10000,

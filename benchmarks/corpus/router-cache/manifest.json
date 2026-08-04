@@ -1,5 +1,5 @@
 {
-  "schema": "needle.frozen-corpus/3",
+  "schema": "needle.frozen-corpus/4",
   "frozen_unix_ms": 1785412789576,
   "arms": [
     "frontier_direct",
@@ -16,7 +16,13 @@
   "next_pilot_path": "minimal-live-pilot.json",
   "next_pilot_digest": "b3:18a434227eb9abf2381eb0a65348f0dba66301ccba7dbdeb57c7933b078180cb",
   "campaign_path": "campaign.json",
-  "campaign_digest": "b3:207fb6ef4a29606c76054b3dcd27641cb10ae114c35501b7b798fb46e7c1a597",
+  "campaign_digest": "b3:082239af1ebe785555801af74c817c5e49c143759cd3e62ef6607f54dadf5e1d",
+  "schedule_path": "schedule.json",
+  "schedule_digest": "b3:c853b4ed84d8e9119013d788a7c769c63fd77f63a947706fbe4c128b65ed51d5",
+  "power_plan_path": "power-plan.json",
+  "power_plan_digest": "b3:8605f040792744907aa94d3ce017a211b774c16521dbe744acb7a1b587647630",
+  "sealed_bundle_schema": "needle.sealed-oracle-index/1",
+  "sealed_bundle_digest": "b3:3750e933fa1226fed1892dc4ba3ddad4f84fbf6bd58135d8f26355103dc681c7",
   "tasks": [
     {
       "id": "ripgrep-glob-case-insensitive-locate-calibration",
@@ -24,20 +30,14 @@
       "split": "calibration",
       "repository_url": "https://github.com/BurntSushi/ripgrep.git",
       "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
-      "prompt": "Where is ripgrep's --glob-case-insensitive option implemented, and which focused test demonstrates its behavior? Give the primary location and only the supporting evidence needed to continue.",
-      "oracle_path": "oracles/ripgrep-glob-case-insensitive-locate.json",
-      "oracle_digest": "b3:efc9f2b932008a42393bad9145d1db1dc420bade8778889d7fcf83d6c9734b7f",
-      "test_identifier": "misc::glob_always_case_insensitive",
-      "focused_command": [
-        "cargo",
-        "test",
-        "--offline",
-        "--test",
-        "integration",
-        "misc::glob_always_case_insensitive",
-        "--",
-        "--exact"
-      ]
+      "prompt": "Where is ripgrep's glob-case-insensitive option implemented, and which focused test demonstrates its behavior? Give the primary location and only the supporting evidence needed to continue.",
+      "material_class": "synthetic",
+      "focused_test_policy": {
+        "identity": "ripgrep.synthetic.glob-case-insensitive.v1",
+        "commitment": "b3:a7d0811cef052068f9640398720e65b19e7f1a9e0990facd03e42a9e97e26f4f"
+      },
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:7a6787e9e7aaa0bcc147e69a7dd32b226390dabc2e854ed7afa2f1d7b36c49b6"
     },
     {
       "id": "ripgrep-crlf-trace-calibration",
@@ -45,20 +45,14 @@
       "split": "calibration",
       "repository_url": "https://github.com/BurntSushi/ripgrep.git",
       "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
-      "prompt": "Trace how ripgrep's --crlf option changes matching and search line terminators, and name a focused test that proves the default scenario.",
-      "oracle_path": "oracles/ripgrep-crlf-trace.json",
-      "oracle_digest": "b3:db68c75eebfab64593825a1563facc1e67634ad15e32dcccbd23c83d655b5059",
-      "test_identifier": "feature::f416_crlf",
-      "focused_command": [
-        "cargo",
-        "test",
-        "--offline",
-        "--test",
-        "integration",
-        "feature::f416_crlf",
-        "--",
-        "--exact"
-      ]
+      "prompt": "Trace how ripgrep's crlf option changes matching and search line terminators, and name a focused test that proves the default scenario.",
+      "material_class": "synthetic",
+      "focused_test_policy": {
+        "identity": "ripgrep.synthetic.crlf.v1",
+        "commitment": "b3:27d2e8e1cecfba3b600bcb411ffea48547319aa3fefd6704c46dd7c13fa5c250"
+      },
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:4e4053553759f507b41bd3b3834691f53b2b743da9b0aa866c6f53764044213d"
     },
     {
       "id": "ripgrep-no-ignore-vcs-locate-holdout",
@@ -66,20 +60,14 @@
       "split": "holdout",
       "repository_url": "https://github.com/BurntSushi/ripgrep.git",
       "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
-      "prompt": "Find the implementation that makes ripgrep's --no-ignore-vcs option stop applying Git ignore rules, and identify a focused test for that behavior.",
-      "oracle_path": "oracles/ripgrep-no-ignore-vcs-locate.json",
-      "oracle_digest": "b3:4eac2f4e630f8a457de9bcfa1cfdd3adef60fd46e399d24ac7479c2b1906398d",
-      "test_identifier": "feature::f68_no_ignore_vcs",
-      "focused_command": [
-        "cargo",
-        "test",
-        "--offline",
-        "--test",
-        "integration",
-        "feature::f68_no_ignore_vcs",
-        "--",
-        "--exact"
-      ]
+      "prompt": "Find the implementation that makes ripgrep's no-ignore-vcs option stop applying repository ignore rules, and identify a focused test for that behavior.",
+      "material_class": "synthetic",
+      "focused_test_policy": {
+        "identity": "ripgrep.synthetic.no-ignore-vcs.v1",
+        "commitment": "b3:ff0c45be0d9ea0e25a4c7a4f6dcac9b153a05b08c7f23d723011e5bf4e58de57"
+      },
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:96c6568343f73fb983c8cae8a7f483d339e14f42d5e6af0c36b2dfdc942f9571"
     },
     {
       "id": "ripgrep-null-data-trace-holdout",
@@ -87,20 +75,14 @@
       "split": "holdout",
       "repository_url": "https://github.com/BurntSushi/ripgrep.git",
       "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
-      "prompt": "Trace how ripgrep's --null-data option changes matching and searching from newline-delimited input to NUL-delimited input, with a focused test for the behavior.",
-      "oracle_path": "oracles/ripgrep-null-data-trace.json",
-      "oracle_digest": "b3:e8efb461add472614a36eb920a0c0aa1857e13fe4834aa12cc2582d9e8df4661",
-      "test_identifier": "feature::f993_null_data",
-      "focused_command": [
-        "cargo",
-        "test",
-        "--offline",
-        "--test",
-        "integration",
-        "feature::f993_null_data",
-        "--",
-        "--exact"
-      ]
+      "prompt": "Trace how ripgrep's null-data option changes matching and searching from newline-delimited input to NUL-delimited input, with a focused test for the behavior.",
+      "material_class": "synthetic",
+      "focused_test_policy": {
+        "identity": "ripgrep.synthetic.null-data.v1",
+        "commitment": "b3:2cc53eb4760e8106d5638ec54c545d7447fda90a10a35668e7707ae5cfe1b21e"
+      },
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:6900cdf524dfaab61c434864f9eaede519737cc9fd30d7b418ef5003d5042beb"
     }
   ]
 }

@@ -1,0 +1,28 @@
+{
+  "schema": "needle.corpus-schedule/1",
+  "manifest_digest": "b3:8be00a443b7e1a57813d8dbe25e6ea22a988f7536bc0f159fee8a58f0fa6cd7a",
+  "power_plan_digest": "b3:8605f040792744907aa94d3ce017a211b774c16521dbe744acb7a1b587647630",
+  "automatic_retries": false,
+  "entries": [
+    {"task_id":"ripgrep-glob-case-insensitive-locate-calibration","route":"locate_implementation","split":"calibration","arm":"frontier_direct","repetition":0},
+    {"task_id":"ripgrep-glob-case-insensitive-locate-calibration","route":"locate_implementation","split":"calibration","arm":"needle_miss","repetition":0},
+    {"task_id":"ripgrep-crlf-trace-calibration","route":"trace_state_flow","split":"calibration","arm":"frontier_direct","repetition":0},
+    {"task_id":"ripgrep-crlf-trace-calibration","route":"trace_state_flow","split":"calibration","arm":"needle_miss","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"frontier_direct","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"native_subagent","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"needle_miss","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"exact_hit","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"partial_hit","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"escalation","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"irrelevant_mutation","repetition":0},
+    {"task_id":"ripgrep-no-ignore-vcs-locate-holdout","route":"locate_implementation","split":"holdout","arm":"relevant_mutation","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"frontier_direct","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"native_subagent","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"needle_miss","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"exact_hit","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"partial_hit","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"escalation","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"irrelevant_mutation","repetition":0},
+    {"task_id":"ripgrep-null-data-trace-holdout","route":"trace_state_flow","split":"holdout","arm":"relevant_mutation","repetition":0}
+  ]
+}

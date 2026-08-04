@@ -1,0 +1,41 @@
+{
+  "schema": "needle.sealed-oracle-index/1",
+  "entries": [
+    {
+      "task_id": "ripgrep-glob-case-insensitive-locate-calibration",
+      "material_class": "synthetic",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:7a6787e9e7aaa0bcc147e69a7dd32b226390dabc2e854ed7afa2f1d7b36c49b6",
+      "focused_test_policy": {"identity": "ripgrep.synthetic.glob-case-insensitive.v1", "commitment": "b3:a7d0811cef052068f9640398720e65b19e7f1a9e0990facd03e42a9e97e26f4f"},
+      "relative_path": "docs/ripgrep-glob-case-insensitive-locate-calibration.json"
+    },
+    {
+      "task_id": "ripgrep-crlf-trace-calibration",
+      "material_class": "synthetic",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:4e4053553759f507b41bd3b3834691f53b2b743da9b0aa866c6f53764044213d",
+      "focused_test_policy": {"identity": "ripgrep.synthetic.crlf.v1", "commitment": "b3:27d2e8e1cecfba3b600bcb411ffea48547319aa3fefd6704c46dd7c13fa5c250"},
+      "relative_path": "docs/ripgrep-crlf-trace-calibration.json"
+    },
+    {
+      "task_id": "ripgrep-no-ignore-vcs-locate-holdout",
+      "material_class": "synthetic",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:96c6568343f73fb983c8cae8a7f483d339e14f42d5e6af0c36b2dfdc942f9571",
+      "focused_test_policy": {"identity": "ripgrep.synthetic.no-ignore-vcs.v1", "commitment": "b3:ff0c45be0d9ea0e25a4c7a4f6dcac9b153a05b08c7f23d723011e5bf4e58de57"},
+      "relative_path": "docs/ripgrep-no-ignore-vcs-locate-holdout.json"
+    },
+    {
+      "task_id": "ripgrep-null-data-trace-holdout",
+      "material_class": "synthetic",
+      "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+      "oracle_schema": "needle.sealed-oracle/1",
+      "oracle_digest": "b3:6900cdf524dfaab61c434864f9eaede519737cc9fd30d7b418ef5003d5042beb",
+      "focused_test_policy": {"identity": "ripgrep.synthetic.null-data.v1", "commitment": "b3:2cc53eb4760e8106d5638ec54c545d7447fda90a10a35668e7707ae5cfe1b21e"},
+      "relative_path": "docs/ripgrep-null-data-trace-holdout.json"
+    }
+  ]
+}

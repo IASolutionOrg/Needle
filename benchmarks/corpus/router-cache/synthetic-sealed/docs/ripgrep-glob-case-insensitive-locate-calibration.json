@@ -1,0 +1,16 @@
+{
+  "schema": "needle.sealed-oracle/1",
+  "task_id": "ripgrep-glob-case-insensitive-locate-calibration",
+  "repository_sha": "4649aa9700619f94cf9c66876e9549d83420e16c",
+  "focused_test_policy": {"identity": "ripgrep.synthetic.glob-case-insensitive.v1", "commitment": "b3:a7d0811cef052068f9640398720e65b19e7f1a9e0990facd03e42a9e97e26f4f"},
+  "focused_test": {"identifier": "misc::glob_always_case_insensitive", "argv": ["cargo", "test", "--offline", "--test", "integration", "misc::glob_always_case_insensitive", "--", "--exact"]},
+  "quality": {
+    "required_files": ["crates/core/flags/hiargs.rs"],
+    "required_symbols": ["globs"],
+    "required_claims": [],
+    "forbidden_claims": [],
+    "focused_test_command": "misc::glob_always_case_insensitive",
+    "accepted_focused_test_identifiers": ["misc::glob_always_case_insensitive"],
+    "focused_test_required": true
+  }
+}
