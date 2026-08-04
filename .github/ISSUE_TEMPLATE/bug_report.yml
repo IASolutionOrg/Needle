@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a reproducible defect in Needle's current public source.
+title: "[Bug]: "
+labels:
+  - bug
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Needle is a pre-alpha project, so first
+        check the current limitations in `PROJECT_STATUS.md`.
+
+        Do not include credentials, private repository content, provider tokens,
+        sealed benchmark material, or vulnerability details. Follow `SECURITY.md`
+        for security reports.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the defect and its user-visible impact.
+      placeholder: A concise description of what is broken and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence that reproduces the problem.
+      placeholder: |
+        1. Start from...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Explain what should have happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include only relevant, non-sensitive version and platform information.
+      placeholder: |
+        Needle commit or version:
+        Operating system and architecture:
+        Rust version:
+        Codex version, if relevant:
+        Node.js version, if relevant:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Select every area that appears relevant.
+      multiple: true
+      options:
+        - Routing, proof, or semantic reuse
+        - Runtime, persistence, or lifecycle
+        - Codex adapter or worker execution
+        - Verified changes, patching, or verification
+        - Web control plane
+        - Benchmarks or evidence
+        - Packaging, compatibility, or CI
+        - Documentation
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Add bounded logs, error messages, or failing test names after removing sensitive data.
+      placeholder: Paste only the smallest relevant excerpt. Do not attach complete private logs.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add links to related issues, regressions, or other useful evidence.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I checked `PROJECT_STATUS.md` and this is not a documented unsupported behavior.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This report contains no credentials, private source, sealed benchmark data, or vulnerability details.
+          required: true
