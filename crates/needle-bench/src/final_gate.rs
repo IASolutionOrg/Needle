@@ -2,8 +2,16 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::{
+    CorpusSchedule, MAX_SCHEDULE_ENTRIES, MultiTaskCampaign, PowerPlan, PowerRoutePlan,
+    campaign_commitment, validate_power_campaign,
+};
+
 pub const MAX_CORPUS_TASKS: usize = 512;
 pub const MAX_CORPUS_MANIFEST_BYTES: usize = 1024 * 1024;
+pub const MAX_FINAL_OBSERVATION_BYTES: usize = 64 * 1024 * 1024;
+pub const MIN_BOOTSTRAP_RESAMPLES: usize = 1_000;
+pub const MAX_BOOTSTRAP_RESAMPLES: usize = 1_000_000;
 const MAX_CORPUS_IDENTIFIER_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -135,6 +143,9 @@ pub struct FrozenCorpusManifest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalObservation {
+    pub corpus_digest: String,
+    pub schedule_digest: String,
+    pub power_plan_digest: String,
     pub task_id: String,
     pub route: BenchmarkRoute,
     pub split: CorpusSplit,
@@ -164,7 +175,10 @@ pub struct RouteGate {
     pub valid_pairs: usize,
     pub required_pairs: Option<usize>,
     pub powered: bool,
+    pub calibration_log_ratio_mean: Option<f64>,
+    pub calibration_log_ratio_stddev: Option<f64>,
     pub infrastructure_failures: usize,
+    pub validation_failures: Vec<String>,
     pub passed: bool,
 }
 
@@ -172,82 +186,133 @@ pub struct RouteGate {
 pub struct FinalGateReport {
     pub schema: String,
     pub corpus_digest: String,
+    pub campaign_digest: String,
+    pub campaign_commitment: String,
+    pub schedule_digest: String,
+    pub power_plan_digest: String,
+    pub power_plan_artifact_digest: String,
+    pub estimator_revision: String,
+    pub alpha_basis_points: u16,
+    pub target_power_basis_points: u16,
+    pub bootstrap_seed: u64,
+    pub bootstrap_resamples: usize,
     pub economic_baseline: FinalArm,
     pub economic_treatment: FinalArm,
     pub manifest_valid: bool,
     pub manifest_errors: Vec<String>,
+    pub contract_valid: bool,
+    pub validation_failures: Vec<String>,
     pub routes: Vec<RouteGate>,
     pub passed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PowerEstimate {
-    pub observed_log_ratio_mean: f64,
-    pub observed_log_ratio_stddev: f64,
-    pub required_pairs_per_route: usize,
-    pub power: f64,
-    pub one_sided_alpha: f64,
+#[derive(Clone, Copy, Debug)]
+pub struct FinalGateContract<'a> {
+    pub manifest: &'a FrozenCorpusManifest,
+    pub campaign: &'a MultiTaskCampaign,
+    pub schedule: &'a CorpusSchedule,
+    pub power_plan: &'a PowerPlan,
+    pub campaign_digest: &'a str,
+    pub schedule_digest: &'a str,
+    pub power_plan_digest: &'a str,
 }
 
-pub fn estimate_required_pairs(calibration_ratios: &[f64]) -> Option<PowerEstimate> {
-    if calibration_ratios.len() < 2
-        || calibration_ratios.iter().any(|ratio| !ratio.is_finite() || *ratio <= 0.0)
-    {
-        return None;
-    }
-    let logs = calibration_ratios.iter().map(|ratio| ratio.ln()).collect::<Vec<_>>();
-    let mean = average(&logs);
-    if mean >= 0.0 {
-        return None;
-    }
-    let variance =
-        logs.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (logs.len() - 1) as f64;
-    let stddev = variance.sqrt();
-    if !stddev.is_finite() || stddev == 0.0 {
-        return None;
-    }
-    let required = (((1.644_853_626_951_472_2 + 1.281_551_565_544_600_4) * stddev / mean.abs())
-        .powi(2))
-    .ceil()
-    .max(2.0) as usize;
-    Some(PowerEstimate {
-        observed_log_ratio_mean: mean,
-        observed_log_ratio_stddev: stddev,
-        required_pairs_per_route: required,
-        power: 0.90,
-        one_sided_alpha: 0.05,
-    })
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapConfig {
+    pub resamples: usize,
+    pub seed: u64,
 }
 
 pub fn evaluate_final_gate(
-    manifest: &FrozenCorpusManifest,
+    contract: FinalGateContract<'_>,
     observations: &[FinalObservation],
-    bootstrap_resamples: usize,
-    bootstrap_seed: u64,
+    bootstrap: BootstrapConfig,
 ) -> FinalGateReport {
-    let mut manifest_errors = validate_frozen_manifest(manifest);
-    if manifest.schema == "needle.frozen-corpus/4" {
-        manifest_errors.push(
-            "v4 final gate is unavailable until schedule-bound exact observations are integrated"
-                .to_owned(),
-        );
-    }
-    manifest_errors.extend(validate_observations(manifest, observations));
+    let FinalGateContract {
+        manifest,
+        campaign,
+        schedule,
+        power_plan,
+        campaign_digest,
+        schedule_digest,
+        power_plan_digest,
+    } = contract;
+    let BootstrapConfig { resamples: bootstrap_resamples, seed: bootstrap_seed } = bootstrap;
+    let manifest_errors = validate_frozen_manifest(manifest);
     let manifest_valid = manifest_errors.is_empty();
+    let mut validation_failures = Vec::new();
+    if manifest.schema != "needle.frozen-corpus/4" {
+        validation_failures.push("final gate requires frozen corpus v4".to_owned());
+    }
+    if !(MIN_BOOTSTRAP_RESAMPLES..=MAX_BOOTSTRAP_RESAMPLES).contains(&bootstrap_resamples) {
+        validation_failures.push("bootstrap resample count is outside bounded limits".to_owned());
+    }
+    validation_failures.extend(validate_power_campaign(campaign));
+    let expected_campaign_commitment = campaign_commitment(campaign);
+    if manifest.campaign_digest.as_deref() != Some(campaign_digest)
+        || !valid_blake3_digest(campaign_digest)
+    {
+        validation_failures.push("campaign digest differs from the frozen manifest".to_owned());
+    }
+    if power_plan.campaign_commitment != expected_campaign_commitment {
+        validation_failures.push("power plan campaign commitment differs".to_owned());
+    }
+    if power_plan.synthetic {
+        validation_failures
+            .push("synthetic power plan is ineligible for the final claim".to_owned());
+    }
+    if manifest.schedule_digest.as_deref() != Some(schedule_digest)
+        || !valid_blake3_digest(schedule_digest)
+    {
+        validation_failures.push("schedule digest differs from the frozen manifest".to_owned());
+    }
+    if manifest.power_plan_digest.as_deref() != Some(power_plan_digest)
+        || !valid_blake3_digest(power_plan_digest)
+    {
+        validation_failures.push("power plan digest differs from the frozen manifest".to_owned());
+    }
+    validation_failures.extend(schedule.validate(manifest, power_plan, power_plan_digest));
+    validation_failures.extend(validate_observations(
+        manifest,
+        schedule,
+        schedule_digest,
+        power_plan_digest,
+        observations,
+    ));
+    let contract_valid = manifest_valid && validation_failures.is_empty();
     let routes = [BenchmarkRoute::LocateImplementation, BenchmarkRoute::TraceStateFlow]
         .into_iter()
-        .map(|route| evaluate_route(observations, route, bootstrap_resamples, bootstrap_seed))
+        .map(|route| {
+            evaluate_route(
+                observations,
+                power_plan.routes.iter().find(|plan| plan.route == route),
+                route,
+                contract_valid,
+                bootstrap_resamples,
+                bootstrap_seed,
+            )
+        })
         .collect::<Vec<_>>();
     FinalGateReport {
-        schema: "needle.final-gate/2".to_owned(),
-        corpus_digest: blake3::hash(&serde_json::to_vec(manifest).unwrap_or_default())
-            .to_hex()
-            .to_string(),
+        schema: "needle.final-gate/3".to_owned(),
+        corpus_digest: crate::corpus_digest(manifest),
+        campaign_digest: campaign_digest.to_owned(),
+        campaign_commitment: expected_campaign_commitment,
+        schedule_digest: schedule_digest.to_owned(),
+        power_plan_digest: power_plan_digest.to_owned(),
+        power_plan_artifact_digest: power_plan.artifact_digest.clone(),
+        estimator_revision: power_plan.estimator_revision.clone(),
+        alpha_basis_points: power_plan.alpha_basis_points,
+        target_power_basis_points: power_plan.target_power_basis_points,
+        bootstrap_seed,
+        bootstrap_resamples,
         economic_baseline: FinalArm::FrontierDirect,
         economic_treatment: FinalArm::NeedleMiss,
         manifest_valid,
         manifest_errors,
-        passed: manifest_valid && routes.iter().all(|route| route.passed),
+        contract_valid,
+        validation_failures,
+        passed: contract_valid && routes.iter().all(|route| route.passed),
         routes,
     }
 }
@@ -433,37 +498,103 @@ fn validate_v4_manifest(manifest: &FrozenCorpusManifest, errors: &mut Vec<String
 
 fn validate_observations(
     manifest: &FrozenCorpusManifest,
+    schedule: &CorpusSchedule,
+    schedule_digest: &str,
+    power_plan_digest: &str,
     observations: &[FinalObservation],
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    let tasks =
-        manifest.tasks.iter().map(|task| (task.id.as_str(), task)).collect::<BTreeMap<_, _>>();
-    let mut observation_keys = BTreeSet::new();
+    if observations.len() > MAX_SCHEDULE_ENTRIES {
+        return vec!["final observation count exceeds bounded maximum".to_owned()];
+    }
+    let manifest_digest = crate::corpus_digest(manifest);
+    let expected = schedule
+        .entries
+        .iter()
+        .filter(|entry| entry.split == CorpusSplit::Holdout)
+        .map(|entry| {
+            (
+                entry.task_id.clone(),
+                entry.route,
+                entry.split,
+                entry.arm,
+                entry.repetition,
+                entry.pair_seed,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut observed = BTreeSet::new();
     for observation in observations {
-        let Some(task) = tasks.get(observation.task_id.as_str()) else {
-            errors.push(format!("observation references unknown task `{}`", observation.task_id));
-            continue;
-        };
-        if task.route != observation.route || task.split != observation.split {
-            errors
-                .push(format!("observation metadata differs from task `{}`", observation.task_id));
+        if observation.corpus_digest != manifest_digest
+            || observation.schedule_digest != schedule_digest
+            || observation.power_plan_digest != power_plan_digest
+        {
+            errors.push(format!(
+                "observation `{}` has stale corpus, schedule, or power-plan identity",
+                observation.task_id
+            ));
+        }
+        if observation.split != CorpusSplit::Holdout {
+            errors.push(format!(
+                "calibration observation `{}` cannot enter the final gate",
+                observation.task_id
+            ));
         }
         let key = (
-            observation.task_id.as_str(),
+            observation.task_id.clone(),
+            observation.route,
+            observation.split,
             observation.arm,
             observation.repetition,
             observation.pair_seed,
         );
-        if !observation_keys.insert(key) {
+        if !observed.insert(key.clone()) {
             errors
                 .push(format!("duplicate observation identity for task `{}`", observation.task_id));
         }
+        if !expected.contains(&key) {
+            errors.push(format!(
+                "observation identity for task `{}` is not present in the frozen schedule",
+                observation.task_id
+            ));
+        }
+        if observation.infrastructure_failure.as_ref().is_some_and(|detail| detail.len() > 512)
+            || observation.recomputed_nodes.len() > 512
+            || observation.expected_invalidated_nodes.len() > 512
+            || observation
+                .recomputed_nodes
+                .iter()
+                .chain(&observation.expected_invalidated_nodes)
+                .any(|node| node.is_empty() || node.len() > 512)
+        {
+            errors.push(format!(
+                "observation `{}` exceeds bounded evidence limits",
+                observation.task_id
+            ));
+        }
     }
-    for task in manifest.tasks.iter().filter(|task| task.split == CorpusSplit::Holdout) {
-        for arm in FinalArm::ALL {
-            if !observations.iter().any(|item| item.task_id == task.id && item.arm == arm) {
-                errors.push(format!("holdout task `{}` is missing arm {arm:?}", task.id));
-            }
+    for missing in expected.difference(&observed) {
+        errors.push(format!(
+            "scheduled holdout observation is missing for task `{}` arm {:?} repetition {} seed {}",
+            missing.0, missing.3, missing.4, missing.5
+        ));
+    }
+    if expected.len()
+        != schedule.entries.iter().filter(|entry| entry.split == CorpusSplit::Holdout).count()
+    {
+        errors.push("frozen schedule contains duplicate holdout identities".to_owned());
+    }
+    let task_metadata = manifest
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), (task.route, task.split)))
+        .collect::<BTreeMap<_, _>>();
+    for observation in observations {
+        if task_metadata.get(observation.task_id.as_str())
+            != Some(&(observation.route, observation.split))
+        {
+            errors
+                .push(format!("observation metadata differs from task `{}`", observation.task_id));
         }
     }
     errors
@@ -487,7 +618,9 @@ fn safe_relative_json_path(value: &str) -> bool {
 
 fn evaluate_route(
     observations: &[FinalObservation],
+    power_plan: Option<&PowerRoutePlan>,
     route: BenchmarkRoute,
+    contract_valid: bool,
     bootstrap_resamples: usize,
     bootstrap_seed: u64,
 ) -> RouteGate {
@@ -495,40 +628,75 @@ fn evaluate_route(
         .iter()
         .filter(|item| item.route == route && item.split == CorpusSplit::Holdout)
         .collect::<Vec<_>>();
+    let mut validation_failures = Vec::new();
+    if !contract_valid {
+        validation_failures
+            .push("global manifest, plan, schedule, or observation contract failed".to_owned());
+    }
     let infrastructure_failures =
         relevant.iter().filter(|item| item.infrastructure_failure.is_some()).count();
-    let valid = relevant
-        .iter()
-        .filter(|item| item.infrastructure_failure.is_none())
-        .copied()
-        .collect::<Vec<_>>();
-    let quality_passed = !valid.is_empty() && valid.iter().all(|item| item.quality_passed);
-    let stale_safe = !valid.is_empty() && valid.iter().all(|item| !item.stale_hit);
-    let exact = valid.iter().filter(|item| item.arm == FinalArm::ExactHit).collect::<Vec<_>>();
+    for item in &relevant {
+        if let Some(detail) = item.infrastructure_failure.as_deref() {
+            let detail = if detail.len() <= 512 { detail } else { "<oversized failure detail>" };
+            validation_failures.push(format!(
+                "task `{}` arm {:?} has an infrastructure failure: {detail}",
+                item.task_id, item.arm,
+            ));
+        }
+        if !item.quality_passed {
+            validation_failures
+                .push(format!("task `{}` arm {:?} failed quality", item.task_id, item.arm));
+        }
+        if item.stale_hit {
+            validation_failures
+                .push(format!("task `{}` arm {:?} produced a stale hit", item.task_id, item.arm));
+        }
+    }
+    let quality_passed = !relevant.is_empty() && relevant.iter().all(|item| item.quality_passed);
+    let stale_safe = !relevant.is_empty() && relevant.iter().all(|item| !item.stale_hit);
+    let exact = relevant.iter().filter(|item| item.arm == FinalArm::ExactHit).collect::<Vec<_>>();
     let exact_zero_worker = !exact.is_empty() && exact.iter().all(|item| item.worker_spawns == 0);
-    let partial = valid.iter().filter(|item| item.arm == FinalArm::PartialHit).collect::<Vec<_>>();
+    if !exact_zero_worker {
+        validation_failures.push("exact-hit observations must spawn zero workers".to_owned());
+    }
+    let partial =
+        relevant.iter().filter(|item| item.arm == FinalArm::PartialHit).collect::<Vec<_>>();
     let partial_exact_recomputation = !partial.is_empty()
         && partial.iter().all(|item| {
             let actual = item.recomputed_nodes.iter().collect::<BTreeSet<_>>();
             let expected = item.expected_invalidated_nodes.iter().collect::<BTreeSet<_>>();
-            actual == expected
+            actual.len() == item.recomputed_nodes.len()
+                && expected.len() == item.expected_invalidated_nodes.len()
+                && actual == expected
         });
-    let zero_main_discovery =
-        !valid.is_empty() && valid.iter().all(|item| item.main_discovery_on_covered_scope == 0);
-    let ratios = paired_ratios(&valid);
-    let calibration = observations
-        .iter()
-        .filter(|item| {
-            item.route == route
-                && item.split == CorpusSplit::Calibration
-                && item.infrastructure_failure.is_none()
-        })
-        .collect::<Vec<_>>();
-    let power = estimate_required_pairs(&paired_ratios(&calibration));
-    let required_pairs = power.as_ref().map(|estimate| estimate.required_pairs_per_route);
-    let powered = required_pairs.is_some_and(|required| ratios.len() >= required);
-    let paired_cost_ratio = (!ratios.is_empty()).then(|| average(&ratios));
-    let bca_95_ci = bca_interval(&ratios, bootstrap_resamples, bootstrap_seed);
+    if !partial_exact_recomputation {
+        validation_failures
+            .push("partial-hit invalidated nodes differ from recomputed nodes".to_owned());
+    }
+    let zero_main_discovery = !relevant.is_empty()
+        && relevant.iter().all(|item| item.main_discovery_on_covered_scope == 0);
+    if !zero_main_discovery {
+        validation_failures.push("covered-scope observation performed main discovery".to_owned());
+    }
+    let (ratios, pair_failures) = paired_ratios(&relevant);
+    validation_failures.extend(pair_failures);
+    let required_pairs = power_plan.map(|plan| plan.required_pairs as usize);
+    if power_plan.is_none() {
+        validation_failures.push(format!("power plan is missing route {route:?}"));
+    }
+    let powered = required_pairs == Some(ratios.len());
+    if !powered {
+        validation_failures.push(format!(
+            "route {route:?} observed {} valid pairs but requires {:?}",
+            ratios.len(),
+            required_pairs
+        ));
+    }
+    let statistical_inputs_valid = validation_failures.is_empty() && powered;
+    let paired_cost_ratio = statistical_inputs_valid.then(|| average(&ratios));
+    let bca_95_ci = statistical_inputs_valid
+        .then(|| bca_interval(&ratios, bootstrap_resamples, bootstrap_seed))
+        .flatten();
     let economics = bca_95_ci.is_some_and(|interval| interval[1] < 1.0);
     RouteGate {
         route,
@@ -542,36 +710,55 @@ fn evaluate_route(
         valid_pairs: ratios.len(),
         required_pairs,
         powered,
+        calibration_log_ratio_mean: power_plan.map(|plan| plan.observed_log_ratio_mean),
+        calibration_log_ratio_stddev: power_plan.map(|plan| plan.observed_log_ratio_stddev),
         infrastructure_failures,
+        validation_failures,
         passed: quality_passed
             && stale_safe
             && exact_zero_worker
             && partial_exact_recomputation
             && zero_main_discovery
             && powered
-            && economics,
+            && economics
+            && statistical_inputs_valid,
     }
 }
 
-fn paired_ratios(observations: &[&FinalObservation]) -> Vec<f64> {
+fn paired_ratios(observations: &[&FinalObservation]) -> (Vec<f64>, Vec<String>) {
     let mut pairs = BTreeMap::<(String, u32, u64), (Option<u64>, Option<u64>)>::new();
+    let mut errors = Vec::new();
     for observation in observations {
         let key = (observation.task_id.clone(), observation.repetition, observation.pair_seed);
         let pair = pairs.entry(key).or_default();
         match observation.arm {
-            FinalArm::FrontierDirect => pair.0 = observation.total_cost_microcredits,
-            FinalArm::NeedleMiss => pair.1 = observation.total_cost_microcredits,
+            FinalArm::FrontierDirect => {
+                if pair.0.is_some() {
+                    errors.push(format!("duplicate baseline for task `{}`", observation.task_id));
+                }
+                pair.0 = observation.total_cost_microcredits;
+            }
+            FinalArm::NeedleMiss => {
+                if pair.1.is_some() {
+                    errors.push(format!("duplicate treatment for task `{}`", observation.task_id));
+                }
+                pair.1 = observation.total_cost_microcredits;
+            }
             _ => {}
         }
     }
-    pairs
-        .into_values()
-        .filter_map(|(native, needle)| {
-            let native = native?;
-            let needle = needle?;
-            (native > 0).then_some(needle as f64 / native as f64)
-        })
-        .collect()
+    let mut ratios = Vec::new();
+    for ((task_id, repetition, pair_seed), (baseline, treatment)) in pairs {
+        match (baseline, treatment) {
+            (Some(baseline), Some(treatment)) if baseline > 0 && treatment > 0 => {
+                ratios.push(treatment as f64 / baseline as f64);
+            }
+            _ => errors.push(format!(
+                "economic pair `{task_id}` repetition {repetition} seed {pair_seed} is incomplete or non-positive"
+            )),
+        }
+    }
+    (ratios, errors)
 }
 
 fn bca_interval(values: &[f64], resamples: usize, seed: u64) -> Option<[f64; 2]> {
@@ -648,237 +835,5 @@ impl Lcg {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn manifest() -> FrozenCorpusManifest {
-        let mut tasks = Vec::new();
-        for route in [BenchmarkRoute::LocateImplementation, BenchmarkRoute::TraceStateFlow] {
-            for split in [CorpusSplit::Calibration, CorpusSplit::Holdout] {
-                tasks.push(CorpusTask {
-                    id: if split == CorpusSplit::Calibration {
-                        format!("{route:?}-cal")
-                    } else {
-                        format!("{route:?}")
-                    },
-                    route,
-                    split,
-                    repository_url: "https://example.invalid/repository.git".to_owned(),
-                    repository_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                    prompt:
-                        "Locate the implementation and provide a focused test for this behavior."
-                            .to_owned(),
-                    material_class: CorpusMaterialClass::Legacy,
-                    focused_test_policy: FocusedTestPolicyRef::default(),
-                    oracle_schema: String::new(),
-                    oracle_path: format!("oracles/{route:?}-{split:?}.json"),
-                    oracle_digest:
-                        "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .to_owned(),
-                    test_identifier: "misc::example".to_owned(),
-                    focused_command: [
-                        "cargo",
-                        "test",
-                        "--offline",
-                        "--test",
-                        "integration",
-                        "misc::example",
-                        "--",
-                        "--exact",
-                    ]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
-                });
-            }
-        }
-        FrozenCorpusManifest {
-            schema: "needle.frozen-corpus/2".to_owned(),
-            frozen_unix_ms: 1,
-            arms: FinalArm::ALL.to_vec(),
-            cost_model_path: "cost-model.json".to_owned(),
-            cost_model_digest:
-                "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
-            next_pilot_path: "minimal-live-pilot.json".to_owned(),
-            next_pilot_digest:
-                "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
-            campaign_path: None,
-            campaign_digest: None,
-            schedule_path: None,
-            schedule_digest: None,
-            power_plan_path: None,
-            power_plan_digest: None,
-            sealed_bundle_schema: None,
-            sealed_bundle_digest: None,
-            tasks,
-        }
-    }
-
-    fn observation(
-        route: BenchmarkRoute,
-        arm: FinalArm,
-        repetition: u32,
-        cost: Option<u64>,
-    ) -> FinalObservation {
-        FinalObservation {
-            task_id: format!("{route:?}"),
-            route,
-            split: CorpusSplit::Holdout,
-            arm,
-            repetition,
-            pair_seed: repetition as u64,
-            quality_passed: true,
-            stale_hit: false,
-            infrastructure_failure: None,
-            total_cost_microcredits: cost,
-            worker_spawns: u32::from(arm != FinalArm::ExactHit),
-            main_discovery_on_covered_scope: 0,
-            recomputed_nodes: if arm == FinalArm::PartialHit {
-                vec!["behavior".to_owned()]
-            } else {
-                Vec::new()
-            },
-            expected_invalidated_nodes: if arm == FinalArm::PartialHit {
-                vec!["behavior".to_owned()]
-            } else {
-                Vec::new()
-            },
-        }
-    }
-
-    #[test]
-    fn bca_gate_passes_only_when_both_routes_have_upper_bound_below_one() {
-        let mut observations = Vec::new();
-        for route in [BenchmarkRoute::LocateImplementation, BenchmarkRoute::TraceStateFlow] {
-            for arm in [
-                FinalArm::NativeSubagent,
-                FinalArm::ExactHit,
-                FinalArm::PartialHit,
-                FinalArm::Escalation,
-                FinalArm::IrrelevantMutation,
-                FinalArm::RelevantMutation,
-            ] {
-                observations.push(observation(route, arm, 0, None));
-            }
-            for repetition in 1..=6 {
-                let mut frontier =
-                    observation(route, FinalArm::FrontierDirect, repetition, Some(1_000));
-                frontier.task_id = format!("{route:?}-cal");
-                frontier.split = CorpusSplit::Calibration;
-                observations.push(frontier);
-                let mut needle = observation(
-                    route,
-                    FinalArm::NeedleMiss,
-                    repetition,
-                    Some(600 + repetition as u64 * 10),
-                );
-                needle.task_id = format!("{route:?}-cal");
-                needle.split = CorpusSplit::Calibration;
-                observations.push(needle);
-            }
-            for repetition in 1..=12 {
-                observations.push(observation(
-                    route,
-                    FinalArm::FrontierDirect,
-                    repetition,
-                    Some(1_000 + repetition as u64),
-                ));
-                observations.push(observation(
-                    route,
-                    FinalArm::NeedleMiss,
-                    repetition,
-                    Some(600 + repetition as u64),
-                ));
-            }
-        }
-        let report = evaluate_final_gate(&manifest(), &observations, 2_000, 7);
-        assert!(report.passed);
-        assert!(report.manifest_valid);
-        assert_eq!(report.economic_baseline, FinalArm::FrontierDirect);
-        assert_eq!(report.economic_treatment, FinalArm::NeedleMiss);
-        assert!(report.routes.iter().all(|route| route.powered));
-        assert!(report.routes.iter().all(|route| route.bca_95_ci.unwrap()[1] < 1.0));
-    }
-
-    #[test]
-    fn any_stale_or_quality_failure_blocks_the_route() {
-        let mut observations = vec![
-            observation(BenchmarkRoute::LocateImplementation, FinalArm::ExactHit, 0, None),
-            observation(BenchmarkRoute::LocateImplementation, FinalArm::PartialHit, 0, None),
-        ];
-        observations[0].stale_hit = true;
-        let report = evaluate_final_gate(&manifest(), &observations, 2_000, 1);
-        assert!(!report.routes[0].passed);
-        assert!(!report.routes[0].stale_safe);
-    }
-
-    #[test]
-    fn incomplete_manifest_or_missing_arms_cannot_pass() {
-        let observations = vec![
-            observation(BenchmarkRoute::LocateImplementation, FinalArm::ExactHit, 0, None),
-            observation(BenchmarkRoute::LocateImplementation, FinalArm::PartialHit, 0, None),
-        ];
-        let report = evaluate_final_gate(&manifest(), &observations, 2_000, 9);
-        assert!(!report.manifest_valid);
-        assert!(!report.passed);
-        assert!(report.manifest_errors.iter().any(|error| error.contains("missing arm")));
-    }
-
-    #[test]
-    fn frozen_corpus_v3_requires_a_content_addressed_campaign() {
-        let mut manifest = manifest();
-        manifest.schema = "needle.frozen-corpus/3".to_owned();
-        assert!(validate_frozen_manifest(&manifest).iter().any(|error| {
-            error == "frozen corpus v3 requires a valid multi-task campaign reference"
-        }));
-
-        manifest.campaign_path = Some("campaign.json".to_owned());
-        manifest.campaign_digest =
-            Some("b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned());
-        assert!(validate_frozen_manifest(&manifest).is_empty());
-    }
-
-    #[test]
-    fn legacy_answer_fields_round_trip_but_v4_rejects_them() {
-        let legacy = manifest();
-        let encoded = serde_json::to_vec(&legacy).expect("legacy manifest serializes");
-        let decoded: FrozenCorpusManifest =
-            serde_json::from_slice(&encoded).expect("legacy manifest round-trips");
-        assert_eq!(decoded, legacy);
-
-        let mut v4 = legacy;
-        v4.schema = "needle.frozen-corpus/4".to_owned();
-        v4.tasks.iter_mut().for_each(|task| {
-            task.material_class = CorpusMaterialClass::Synthetic;
-            task.oracle_path.clear();
-            task.test_identifier.clear();
-            task.focused_command.clear();
-        });
-        let mut contaminated = v4.clone();
-        contaminated.tasks[0].oracle_path = "legacy.json".to_owned();
-        let errors = validate_frozen_manifest(&contaminated);
-        assert!(errors.iter().any(|error| error.contains("legacy answer-bearing")));
-    }
-
-    #[test]
-    fn v4_final_gate_is_explicitly_fail_closed() {
-        let mut manifest = manifest();
-        manifest.schema = "needle.frozen-corpus/4".to_owned();
-        let report = evaluate_final_gate(&manifest, &[], 1_000, 1);
-        assert!(!report.passed);
-        assert!(
-            report
-                .manifest_errors
-                .iter()
-                .any(|error| error.contains("schedule-bound exact observations"))
-        );
-    }
-
-    #[test]
-    fn power_estimate_uses_only_observed_calibration_variance() {
-        let estimate = estimate_required_pairs(&[0.70, 0.76, 0.82, 0.73]).unwrap();
-        assert_eq!(estimate.power, 0.90);
-        assert_eq!(estimate.one_sided_alpha, 0.05);
-        assert!(estimate.required_pairs_per_route >= 2);
-    }
-}
+#[path = "final_gate/tests.rs"]
+mod current_tests;

@@ -45,8 +45,9 @@ Public corpus manifests use `needle.frozen-corpus/4`: they contain only
 answer-free prompts, source identities, policy commitments, and oracle
 commitments. Answer bytes and quality/test policy live in an evaluator-owned
 sealed bundle indexed outside the public manifest. The checked-in router-cache
-tasks and power plan are synthetic fixtures and are permanently ineligible for
-provider evidence.
+tasks, calibration observations, and power plan are synthetic fixtures and are
+permanently ineligible for provider evidence. The synthetic calibration JSONL
+exists only to reproduce the checked-in plan and exercise the offline protocol.
 
 The app provider path remains fail-closed until an isolated executor/broker
 consumes only the bounded ArmLaunch projection. Evaluator callers must keep
@@ -171,6 +172,32 @@ Preflight and an estimate do not authorize execution. Failures do not authorize
 automatic retry.
 
 ## Final statistical gate
+
+Power planning and final evaluation are separate digest-bound stages:
+
+1. `experiment power-plan` accepts calibration observations only. Every
+   economic pair must contain exactly one `FrontierDirect` and one `NeedleMiss`
+   record with matching corpus, campaign commitment, task, route, split,
+   repetition, and pair seed. Failed, low-quality, missing, duplicate,
+   non-positive, mixed-material, non-beneficial, or zero-variance calibration
+   fails without emitting a plan.
+2. A canonical `needle.power-plan/2` records the calibration-input digest,
+   estimator revision, alpha, target power, per-route log-ratio diagnostics,
+   required holdout pairs, material classification, and its canonical artifact
+   digest. The final gate verifies its campaign commitment against the exact
+   campaign bytes frozen by the manifest. The frozen schedule references the
+   exact serialized plan and must contain exactly the required holdout count
+   for each route.
+3. `experiment final-report` accepts holdout observations only. Their identity
+   includes corpus, schedule, power plan, task, route, split, repetition, pair
+   seed, and arm. Every scheduled identity must appear exactly once. Explicit
+   failures remain in the report; the evaluator never drops them to calculate
+   a more favorable ratio or interval.
+
+Calibration values cannot contribute to the final ratio, BCa interval, quality
+gate, or staleness gate. Holdout values cannot recompute or resize the frozen
+plan. Synthetic plans remain structurally testable but always fail the final
+economic claim.
 
 A future general claim requires:
 
