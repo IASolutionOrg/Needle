@@ -1,0 +1,103 @@
+name: Feature request
+description: Propose a focused capability or improvement for Needle.
+title: "[Feature]: "
+labels:
+  - enhancement
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing a substantial change, review `PROJECT_STATUS.md`,
+        `docs/ROADMAP.md`, and `CONTRIBUTING.md`. Configuration support for an
+        agent host does not imply execution or orchestration support.
+
+        Describe the problem and observable outcome. A complete implementation
+        design is welcome but not required.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete limitation or user need should Needle address?
+      placeholder: Explain the current limitation without assuming a specific implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: Describe the observable behavior that would make this request complete.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      multiple: true
+      options:
+        - Role profiles or agents
+        - Runtime or lifecycle orchestration
+        - Routing, proof, or semantic reuse
+        - Codex adapter or worker execution
+        - Other-host configuration
+        - Verified changes
+        - Web control plane
+        - Benchmarks or evidence
+        - Packaging or compatibility
+        - Security
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_scope
+    attributes:
+      label: Proposed scope
+      description: If you have an approach in mind, describe the smallest complete slice and its boundaries.
+      placeholder: Include important constraints, invariants, or non-goals when known.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe existing workflows or simpler alternatives you considered.
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility, safety, and performance impact
+      description: Note any expected effect on schemas, storage, cache identity, execution authority, security boundaries, latency, memory, or packaging.
+      placeholder: Write "No known impact" when none is currently known.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Acceptance evidence
+      description: What tests, fixtures, benchmarks, or live evidence would demonstrate completion?
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Link related issues, documentation, examples, or prior art.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I checked `PROJECT_STATUS.md` and `docs/ROADMAP.md` for the current boundary.
+          required: true
+        - label: I searched existing issues for the same request.
+          required: true
+        - label: I understand that an accepted request is not a release, support, performance, or provider-backed evidence claim.
+          required: true
+        - label: This request contains no credentials, private source, sealed benchmark material, or vulnerability details.
+          required: true
