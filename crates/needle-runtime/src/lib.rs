@@ -25,10 +25,10 @@ pub use snapshot::{
     validate_need_result,
 };
 pub use store::{
-    CacheRecord, ChangeAttemptRecord, ConfigExport, MainTurnObservationRecord, NeedShadowRecord,
-    NeedShadowWrite, NeedStepEventRecord, NeedStepRequestRecord, NegativeAttemptRecord,
-    OperatorCostKey, OperatorCostObservation, PatchFileBlob, PreparedChangeRecord,
-    ProofAccountingRecord, RoleProfileAuditOperation, RoleProfileAuditRecord,
+    CacheRecord, ChangeAttemptRecord, ConfigExport, LifecycleProjection, MainTurnObservationRecord,
+    NeedShadowRecord, NeedShadowWrite, NeedStepEventRecord, NeedStepRequestRecord,
+    NegativeAttemptRecord, OperatorCostKey, OperatorCostObservation, PatchFileBlob,
+    PreparedChangeRecord, ProofAccountingRecord, RoleProfileAuditOperation, RoleProfileAuditRecord,
     RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord, RuntimeSettings,
     RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
 };
@@ -81,7 +81,7 @@ pub use approval::{
 };
 pub use artifact_cache::{ArtifactCache, ArtifactCacheError, PlanCacheResult};
 pub use changes::{
-    ChangeApplyError, ChangeMaterializationError, apply_verified_change,
+    ChangeApplyError, ChangeMaterializationError, apply_lifecycle_change, apply_verified_change,
     materialize_patch_artifact, recover_pending_change_applies, validate_patch_artifact_base,
 };
 pub use claim_proof::{

@@ -131,6 +131,41 @@ pub fn apply_verified_change(
     change_id: &ChangeId,
     expected_change_digest: Digest,
 ) -> Result<ChangeApplyRecord, ChangeApplyError> {
+    apply_verified_change_with_lifecycle(
+        store,
+        repository_root,
+        change_id,
+        expected_change_digest,
+        None,
+    )
+}
+
+/// Apply a verified lifecycle change only after the exact approved lifecycle
+/// projection has been supplied. Legacy changes without a lifecycle continue
+/// through `apply_verified_change`; the two boundaries cannot be substituted.
+pub fn apply_lifecycle_change(
+    store: &RuntimeStore,
+    repository_root: &Path,
+    change_id: &ChangeId,
+    expected_change_digest: Digest,
+    expected_lifecycle_digest: Digest,
+) -> Result<ChangeApplyRecord, ChangeApplyError> {
+    apply_verified_change_with_lifecycle(
+        store,
+        repository_root,
+        change_id,
+        expected_change_digest,
+        Some(expected_lifecycle_digest),
+    )
+}
+
+fn apply_verified_change_with_lifecycle(
+    store: &RuntimeStore,
+    repository_root: &Path,
+    change_id: &ChangeId,
+    expected_change_digest: Digest,
+    expected_lifecycle_digest: Option<Digest>,
+) -> Result<ChangeApplyRecord, ChangeApplyError> {
     let repository_root = fs::canonicalize(repository_root)?;
     let repository_text = repository_root.to_string_lossy().into_owned();
     recover_pending_change_applies(store, &repository_root)?;
@@ -177,7 +212,12 @@ pub fn apply_verified_change(
         "patch_id": prepared.patch.id,
         "paths": prepared.patch.files.iter().map(|file| &file.path).collect::<Vec<_>>()
     });
-    store.begin_change_apply(&record, &journal, expected_change_digest)?;
+    store.begin_change_apply_with_lifecycle(
+        &record,
+        &journal,
+        expected_change_digest,
+        expected_lifecycle_digest,
+    )?;
     let applied = materialize_patch_artifact(&repository_root, &prepared.patch, &blobs)
         .map_err(ChangeApplyError::from)
         .and_then(|_| capture_git_snapshot(&repository_root).map_err(ChangeApplyError::from));

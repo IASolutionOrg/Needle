@@ -56,6 +56,13 @@ and verification are exchanged as bounded typed artifacts rather than raw
 transcripts. Write-capable roles remain confined to disposable checkouts, and
 active-worktree mutation remains an explicit parent-owned action.
 
+The durable contract and SQLite journal for this sequence are implemented and
+offline validated. They freeze active role-profile revisions, certified test
+plans, the source snapshot, cumulative budget, one repair allowance, review and
+verifier provenance, and approval against the exact verified state digest.
+Codex process supervision and the lifecycle read/timeline UI remain separate
+pending slices; the contract alone does not launch a lifecycle worker.
+
 ## Milestone 3: Other-host subagent configuration
 
 Add configuration-only interoperability before any non-Codex orchestration.

@@ -10,6 +10,7 @@ mod artifact;
 mod change;
 pub mod claim;
 mod domain;
+mod lifecycle;
 mod multi_need;
 mod role_profile;
 mod semantic;
@@ -24,6 +25,7 @@ pub use claim::{
     MAX_SELECTED_CLAIMS, ProofComponent, runtime_flow_anchor,
 };
 pub use domain::*;
+pub use lifecycle::*;
 pub use multi_need::*;
 pub use role_profile::*;
 pub use semantic::*;
