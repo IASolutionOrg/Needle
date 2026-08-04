@@ -1,7 +1,8 @@
 use super::*;
 use needle_core::{
     CanonicalHasher, ChangeApplyId, ChangeApplyRecord, ChangeApplyStatus, ChangeId, ChangeRequest,
-    PatchArtifact, PatchId, VerificationArtifact, VerificationStatus,
+    LifecyclePhase, LifecycleReason, PatchArtifact, PatchId, VerificationArtifact,
+    VerificationStatus,
 };
 
 type PreparedChangeRow = (
@@ -331,6 +332,12 @@ impl RuntimeStore {
                 &patch.change_id,
                 role_profile_provenance,
             )?;
+            super::lifecycles::require_lifecycle_worker_phase(
+                &transaction,
+                &patch.change_id,
+                LifecyclePhase::Implement,
+                role_profile_provenance,
+            )?;
         }
         match &existing {
             None if patch.revision != 1 => {
@@ -551,6 +558,12 @@ impl RuntimeStore {
         if changed != 1 {
             return Err(StoreError::ChangeConflict(change_id.to_string()));
         }
+        super::lifecycles::fail_lifecycle(
+            &transaction,
+            change_id,
+            LifecycleReason::new("change_preparation_failed", reason.as_bytes())?,
+            now,
+        )?;
         transaction.execute(
             "INSERT INTO change_events(
                 change_id, event_type, payload_digest, payload_json, created_unix_ms
@@ -607,6 +620,13 @@ impl RuntimeStore {
         if changed != 1 {
             return Err(StoreError::ChangeConflict(change_id.to_string()));
         }
+        super::lifecycles::consume_lifecycle_repair(
+            &transaction,
+            change_id,
+            patch_id,
+            verification.id,
+            now,
+        )?;
         let payload_json = serde_json::to_string(&with_role_profile_provenance(
             &serde_json::json!({
                 "patch_id": patch_id,
@@ -695,18 +715,28 @@ impl RuntimeStore {
                 "verification references an unknown patch".to_owned(),
             ));
         }
-        let stored_provenance = require_change_role_profile_provenance(
+        let lifecycle_bound = super::lifecycles::require_lifecycle_worker_phase(
             &transaction,
             &artifact.change_id,
+            LifecyclePhase::Verify,
             role_profile_provenance,
         )?;
+        let event_provenance = if lifecycle_bound {
+            role_profile_provenance.cloned()
+        } else {
+            require_change_role_profile_provenance(
+                &transaction,
+                &artifact.change_id,
+                role_profile_provenance,
+            )?
+        };
         let event_payload = with_role_profile_provenance(
             &serde_json::json!({
                 "verification_id": artifact.id,
                 "patch_id": artifact.patch_id,
                 "verdict": verdict
             }),
-            stored_provenance.as_ref(),
+            event_provenance.as_ref(),
         );
         let event_json = serde_json::to_string(&event_payload)?;
         let event_digest = Digest::blake3(event_json.as_bytes());
@@ -916,6 +946,16 @@ impl RuntimeStore {
         journal: &serde_json::Value,
         expected_change_digest: Digest,
     ) -> Result<(), StoreError> {
+        self.begin_change_apply_with_lifecycle(record, journal, expected_change_digest, None)
+    }
+
+    pub fn begin_change_apply_with_lifecycle(
+        &self,
+        record: &ChangeApplyRecord,
+        journal: &serde_json::Value,
+        expected_change_digest: Digest,
+        expected_lifecycle_digest: Option<Digest>,
+    ) -> Result<(), StoreError> {
         if record.status != ChangeApplyStatus::Applying
             || record.post_snapshot.is_some()
             || record.completed_unix_ms.is_some()
@@ -1025,6 +1065,17 @@ impl RuntimeStore {
         if existing != 0 {
             return Err(StoreError::ChangeConflict(record.change_id.to_string()));
         }
+        let verification_id =
+            verification.as_ref().expect("verified change validation requires an artifact").id;
+        super::lifecycles::begin_lifecycle_apply(
+            &transaction,
+            &record.change_id,
+            expected_lifecycle_digest,
+            record.id,
+            record.patch_id,
+            verification_id,
+            record.created_unix_ms,
+        )?;
         transaction.execute(
             "INSERT INTO change_applies(
                 apply_id, change_id, patch_id, repository_root, pre_snapshot_digest,
@@ -1110,6 +1161,13 @@ impl RuntimeStore {
         transaction.execute(
             "UPDATE change_requests SET state=?2, updated_unix_ms=?3 WHERE change_id=?1",
             params![change_id, change_state, completed_unix_ms],
+        )?;
+        super::lifecycles::finish_lifecycle_apply(
+            &transaction,
+            &parsed_change_id,
+            apply_id,
+            status,
+            completed_unix_ms,
         )?;
         let event_json = serde_json::to_string(&with_role_profile_provenance(
             &serde_json::json!({

@@ -74,6 +74,42 @@ the worker's writable boundary.
 The verifier is a separate read-only worker. It receives the patched checkout,
 acceptance criteria, and certified test context, but no patcher transcript.
 
+## Parent-owned development lifecycle
+
+Core defines an opt-in, depth-one state machine with exactly this worker order:
+
+```text
+explore -> implement -> test -> review -> verify -> apply
+```
+
+The parent is the only transition authority. A lifecycle freezes the change
+ID, source snapshot, active explorer/implementer/test-runner/reviewer/verifier
+profile revisions, sorted certified test plans, cumulative budget, and
+concurrency of one. Worker completions carry typed bounded data and cannot
+create another worker or write a transition themselves.
+
+Review and verification are separate contracts. Review consumes the current
+patch and redacted acceptance-criterion digests. Verification references a
+canonical `VerificationArtifact` created by the distinct verifier profile; it
+cannot be replaced by the review artifact or supplied with a patcher
+transcript. Missing or unavailable test evidence fails closed, and only one
+repair reservation may be consumed.
+
+Runtime stores the current projection in `change_lifecycles` and appends every
+transition to the existing `change_events` journal in one SQLite transaction.
+Worker artifacts are persisted and validated before the separate parent
+transition; a crash between those steps leaves the lifecycle in its prior phase
+rather than advancing without a reference. Repair and apply transitions share
+the transaction that mutates their existing change-journal records. Projection
+and event payload digests are checked on read, replay must reproduce the same
+state, and compare-and-swap state digests serialize concurrent transitions.
+Lifecycle apply additionally requires an explicit user approval bound to the
+current patch, verification, and lifecycle digest.
+
+This layer is the durable orchestration contract, not the Codex lifecycle
+executor or read UI. Those consumers remain separate and must use the typed
+parent operations rather than receiving direct store capability.
+
 ## Request flow
 
 ```text
@@ -122,7 +158,8 @@ not an unbounded worker tree.
 
 SQLite stores immutable definitions, settings, sessions, needs, steps,
 artifacts, claims, dependencies, certificates, plans, attempts, approvals,
-usage, economic observations, changes, verification, and apply journals.
+usage, economic observations, changes, lifecycle projections and append-only
+events, verification, and apply journals.
 
 Migrations are additive and checksummed. Existing migration text is immutable.
 Sessions retain their initial route set, prompt profile, grammar or transport

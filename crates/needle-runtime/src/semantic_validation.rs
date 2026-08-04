@@ -165,7 +165,7 @@ pub fn validate_semantic_test_plan(
     )
 }
 
-fn validate_parent_owned_test_plan_binding(
+pub(crate) fn validate_parent_owned_test_plan_binding(
     worker_artifact: &SemanticWorkerArtifact,
     declared_plan: &TestPlan,
 ) -> Result<(), SemanticValidationError> {
@@ -794,7 +794,7 @@ pub fn manifest_digest(manifest: &DependencyManifest) -> Digest {
     hasher.finish()
 }
 
-fn validation_certificate_id(
+pub(crate) fn validation_certificate_id(
     artifact: ArtifactId,
     input_artifacts: &[ArtifactId],
     evidence_ids: &[String],
