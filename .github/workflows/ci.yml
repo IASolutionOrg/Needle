@@ -136,9 +136,9 @@ jobs:
           cargo run --locked -p needle-app -- plugin package --output ci-plugin
           cargo run --locked -p needle-app -- plugin package --benchmark --output ci-benchmark-plugin
 
-  # Preserve the existing required-check context while making it cover every OS.
-  checks:
-    name: checks (ubuntu-latest)
+  # Single required check covering every CI stage and operating system.
+  ci-required:
+    name: ci-required
     if: always()
     needs: [frontend-quality, rust-format, platform-checks]
     runs-on: ubuntu-latest
