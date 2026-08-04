@@ -6,8 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CORPUS_SCHEDULE_SCHEMA: &str = "needle.corpus-schedule/1";
-pub const POWER_PLAN_SCHEMA: &str = "needle.power-plan/1";
+pub const POWER_PLAN_SCHEMA: &str = "needle.power-plan/2";
 pub const ARM_LAUNCH_SCHEMA: &str = "needle.arm-launch/1";
+pub const POWER_PLAN_ESTIMATOR_REVISION: &str = "needle.paired-log-ratio-power/1";
+pub const POWER_PLAN_PAIR_KEY: &str =
+    "corpus_digest:campaign_commitment:task_id:route:split:repetition:pair_seed";
 pub const MAX_POWER_PLAN_PAIRS: u32 = 10_000;
 pub const MAX_SCHEDULE_ENTRIES: usize = 100_000;
 pub const MAX_SCHEDULE_BYTES: usize = 4 * 1024 * 1024;
@@ -16,12 +19,13 @@ const MAX_PROMPT_BYTES: usize = 4_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScheduleEntry {
+pub struct CorpusScheduleEntry {
     pub task_id: String,
     pub route: BenchmarkRoute,
     pub split: CorpusSplit,
     pub arm: FinalArm,
     pub repetition: u32,
+    pub pair_seed: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -52,7 +56,7 @@ pub struct PowerPlan {
     pub schema: String,
     pub plan_id: String,
     pub manifest_digest: String,
-    pub campaign_digest: String,
+    pub campaign_commitment: String,
     pub calibration_input_digest: String,
     pub estimator_revision: String,
     pub alpha_basis_points: u16,
@@ -60,6 +64,7 @@ pub struct PowerPlan {
     pub routes: Vec<PowerRoutePlan>,
     pub validated: bool,
     pub synthetic: bool,
+    pub artifact_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -76,6 +81,17 @@ impl PowerPlanReference {
 }
 
 impl PowerPlan {
+    pub fn canonical_digest(&self) -> String {
+        let mut canonical = self.clone();
+        canonical.artifact_digest.clear();
+        digest_json(&canonical)
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.artifact_digest = self.canonical_digest();
+        self
+    }
+
     pub fn validate(&self, manifest: &FrozenCorpusManifest) -> Vec<String> {
         let mut errors = Vec::new();
         if self.schema != POWER_PLAN_SCHEMA {
@@ -87,13 +103,15 @@ impl PowerPlan {
         if self.manifest_digest != corpus_digest(manifest) {
             errors.push("power plan manifest digest differs".to_owned());
         }
-        if !valid_digest(&self.campaign_digest) {
-            errors.push("power plan campaign digest is invalid".to_owned());
+        if !valid_digest(&self.campaign_commitment) {
+            errors.push("power plan campaign commitment is invalid".to_owned());
         }
         if !valid_digest(&self.calibration_input_digest) {
             errors.push("power plan calibration-input digest is invalid".to_owned());
+        } else if self.plan_id != format!("power-plan-{}", &self.calibration_input_digest[3..19]) {
+            errors.push("power plan id differs from the calibration-input digest".to_owned());
         }
-        if self.estimator_revision.trim().is_empty() || self.estimator_revision.len() > 128 {
+        if self.estimator_revision != POWER_PLAN_ESTIMATOR_REVISION {
             errors.push("power plan estimator revision is invalid".to_owned());
         }
         if self.alpha_basis_points != 500 || self.target_power_basis_points != 9_000 {
@@ -113,15 +131,19 @@ impl PowerPlan {
             }
             if route.baseline_arm != FinalArm::FrontierDirect
                 || route.treatment_arm != FinalArm::NeedleMiss
-                || route.pair_key != "task_id:repetition"
+                || route.pair_key != POWER_PLAN_PAIR_KEY
                 || !route.observed_log_ratio_mean.is_finite()
                 || route.observed_log_ratio_mean >= 0.0
                 || route.observed_log_ratio_mean < -100.0
                 || !route.observed_log_ratio_stddev.is_finite()
                 || route.observed_log_ratio_stddev <= 0.0
                 || route.observed_log_ratio_stddev > 100.0
-                || route.required_pairs == 0
+                || route.required_pairs < 3
                 || route.required_pairs > MAX_POWER_PLAN_PAIRS
+                || crate::required_pairs_for_moments(
+                    route.observed_log_ratio_mean,
+                    route.observed_log_ratio_stddev,
+                ) != Some(route.required_pairs as usize)
             {
                 errors
                     .push(format!("power plan route {:?} has invalid bounded values", route.route));
@@ -129,6 +151,25 @@ impl PowerPlan {
         }
         if !self.validated {
             errors.push("power plan has not been validated".to_owned());
+        }
+        let calibration_material = manifest
+            .tasks
+            .iter()
+            .filter(|task| task.split == CorpusSplit::Calibration)
+            .map(|task| task.material_class)
+            .collect::<BTreeSet<_>>();
+        let expected_synthetic =
+            calibration_material == BTreeSet::from([CorpusMaterialClass::Synthetic]);
+        if calibration_material.iter().any(|material| *material == CorpusMaterialClass::Legacy)
+            || calibration_material.len() != 1
+            || self.synthetic != expected_synthetic
+        {
+            errors.push(
+                "power plan material classification differs from calibration tasks".to_owned(),
+            );
+        }
+        if self.artifact_digest != self.canonical_digest() {
+            errors.push("power plan artifact digest differs from canonical content".to_owned());
         }
         errors
     }
@@ -145,7 +186,7 @@ pub struct CorpusSchedule {
     pub manifest_digest: String,
     pub power_plan_digest: String,
     pub automatic_retries: bool,
-    pub entries: Vec<ScheduleEntry>,
+    pub entries: Vec<CorpusScheduleEntry>,
 }
 
 impl CorpusSchedule {
@@ -155,7 +196,7 @@ impl CorpusSchedule {
         power_plan: &PowerPlan,
         raw_power_plan_digest: &str,
     ) -> Vec<String> {
-        let mut errors = Vec::new();
+        let mut errors = power_plan.validate(manifest);
         if self.schema != CORPUS_SCHEDULE_SCHEMA {
             errors.push("corpus schedule schema is unsupported".to_owned());
         }
@@ -200,6 +241,7 @@ pub struct ArmLaunch {
     pub prompt: String,
     pub arm: FinalArm,
     pub repetition: u32,
+    pub pair_seed: u64,
     pub focused_test_policy_identity: String,
     pub focused_test_policy_commitment: String,
 }
@@ -209,6 +251,7 @@ impl ArmLaunch {
         task: &CorpusTask,
         arm: FinalArm,
         repetition: u32,
+        pair_seed: u64,
         manifest_digest: &str,
         schedule_digest: &str,
         power_plan_digest: &str,
@@ -245,6 +288,7 @@ impl ArmLaunch {
             prompt: task.prompt.clone(),
             arm,
             repetition,
+            pair_seed,
             focused_test_policy_identity: task.focused_test_policy.identity.clone(),
             focused_test_policy_commitment: task.focused_test_policy.commitment.clone(),
         })
@@ -294,6 +338,7 @@ pub fn build_launch_plan(
                 task,
                 entry.arm,
                 entry.repetition,
+                entry.pair_seed,
                 &manifest_digest,
                 schedule_digest,
                 power_plan_digest,
@@ -310,9 +355,10 @@ fn validate_entries_in_manifest_order(
     errors: &mut Vec<String>,
 ) {
     let mut offset = 0usize;
-    let mut holdout_pairs = BTreeMap::<BenchmarkRoute, BTreeSet<(String, u32)>>::new();
+    let mut holdout_pairs = BTreeMap::<BenchmarkRoute, BTreeSet<(String, u32, u64)>>::new();
     let calibration_arms = [FinalArm::FrontierDirect, FinalArm::NeedleMiss];
     for task in manifest.tasks.iter().filter(|task| task.split == CorpusSplit::Calibration) {
+        let mut pair_seed = None;
         for arm in calibration_arms {
             let Some(entry) = schedule.entries.get(offset) else {
                 errors.push("schedule is missing a calibration entry".to_owned());
@@ -328,12 +374,19 @@ fn validate_entries_in_manifest_order(
                     "schedule calibration entries differ from canonical task order".to_owned(),
                 );
             }
+            match pair_seed {
+                Some(expected) if expected != entry.pair_seed => {
+                    errors.push("schedule calibration pair seeds differ between arms".to_owned());
+                }
+                None => pair_seed = Some(entry.pair_seed),
+                _ => {}
+            }
             offset = offset.saturating_add(1);
         }
     }
     for task in manifest.tasks.iter().filter(|task| task.split == CorpusSplit::Holdout) {
         let mut task_pairs = BTreeSet::new();
-        let mut pair_counts = BTreeMap::<(String, u32), usize>::new();
+        let mut pair_counts = BTreeMap::<(String, u32, u64), usize>::new();
         let task_start = offset;
         while let Some(entry) = schedule.entries.get(offset) {
             if entry.task_id != task.id {
@@ -342,7 +395,7 @@ fn validate_entries_in_manifest_order(
             if entry.route != task.route || entry.split != task.split {
                 errors.push("schedule holdout metadata differs from manifest task".to_owned());
             }
-            let pair = (entry.task_id.clone(), entry.repetition);
+            let pair = (entry.task_id.clone(), entry.repetition, entry.pair_seed);
             task_pairs.insert(pair.clone());
             *pair_counts.entry(pair.clone()).or_default() += 1;
             holdout_pairs.entry(task.route).or_default().insert(pair);
@@ -356,6 +409,10 @@ fn validate_entries_in_manifest_order(
                     "schedule holdout repetitions are not in canonical block order".to_owned(),
                 );
             }
+            let block_start = offset - within_pair;
+            if schedule.entries[block_start].pair_seed != entry.pair_seed {
+                errors.push("schedule holdout pair seeds differ between arms".to_owned());
+            }
             offset = offset.saturating_add(1);
         }
         if task_pairs.is_empty() {
@@ -363,7 +420,7 @@ fn validate_entries_in_manifest_order(
             continue;
         }
         let repetitions =
-            task_pairs.iter().map(|(_, repetition)| *repetition).collect::<BTreeSet<_>>();
+            task_pairs.iter().map(|(_, repetition, _)| *repetition).collect::<BTreeSet<_>>();
         if repetitions
             .iter()
             .copied()
@@ -463,12 +520,13 @@ mod tests {
     fn plan(manifest: &FrozenCorpusManifest) -> PowerPlan {
         PowerPlan {
             schema: POWER_PLAN_SCHEMA.to_owned(),
-            plan_id: "synthetic".to_owned(),
+            plan_id: "power-plan-0123456789abcdef".to_owned(),
             manifest_digest: corpus_digest(manifest),
-            campaign_digest: manifest.campaign_digest.clone().unwrap(),
+            campaign_commitment:
+                "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
             calibration_input_digest:
                 "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
-            estimator_revision: "issue-7-structural-v1".to_owned(),
+            estimator_revision: POWER_PLAN_ESTIMATOR_REVISION.to_owned(),
             alpha_basis_points: 500,
             target_power_basis_points: 9_000,
             routes: vec![
@@ -476,48 +534,55 @@ mod tests {
                     route: BenchmarkRoute::LocateImplementation,
                     baseline_arm: FinalArm::FrontierDirect,
                     treatment_arm: FinalArm::NeedleMiss,
-                    pair_key: "task_id:repetition".to_owned(),
+                    pair_key: POWER_PLAN_PAIR_KEY.to_owned(),
                     observed_log_ratio_mean: -0.4,
                     observed_log_ratio_stddev: 0.2,
-                    required_pairs: 1,
+                    required_pairs: 3,
                 },
                 PowerRoutePlan {
                     route: BenchmarkRoute::TraceStateFlow,
                     baseline_arm: FinalArm::FrontierDirect,
                     treatment_arm: FinalArm::NeedleMiss,
-                    pair_key: "task_id:repetition".to_owned(),
+                    pair_key: POWER_PLAN_PAIR_KEY.to_owned(),
                     observed_log_ratio_mean: -0.4,
                     observed_log_ratio_stddev: 0.2,
-                    required_pairs: 1,
+                    required_pairs: 3,
                 },
             ],
             validated: true,
             synthetic: true,
+            artifact_digest: String::new(),
         }
+        .seal()
     }
 
     fn schedule(manifest: &FrozenCorpusManifest, plan: &PowerPlan) -> CorpusSchedule {
         let mut entries = Vec::new();
         for task in manifest.tasks.iter().filter(|task| task.split == CorpusSplit::Calibration) {
             for arm in [FinalArm::FrontierDirect, FinalArm::NeedleMiss] {
-                entries.push(ScheduleEntry {
+                entries.push(CorpusScheduleEntry {
                     task_id: task.id.clone(),
                     route: task.route,
                     split: task.split,
                     arm,
                     repetition: 0,
+                    pair_seed: 1,
                 });
             }
         }
         for task in manifest.tasks.iter().filter(|task| task.split == CorpusSplit::Holdout) {
-            for arm in FinalArm::ALL {
-                entries.push(ScheduleEntry {
-                    task_id: task.id.clone(),
-                    route: task.route,
-                    split: task.split,
-                    arm,
-                    repetition: 0,
-                });
+            let required = plan.required_pairs(task.route).unwrap();
+            for repetition in 0..required {
+                for arm in FinalArm::ALL {
+                    entries.push(CorpusScheduleEntry {
+                        task_id: task.id.clone(),
+                        route: task.route,
+                        split: task.split,
+                        arm,
+                        repetition,
+                        pair_seed: 100 + repetition as u64,
+                    });
+                }
             }
         }
         let bytes = serde_json::to_vec(&plan).unwrap();
@@ -572,25 +637,19 @@ mod tests {
     #[test]
     fn schedule_rejects_complete_holdout_blocks_in_reversed_repetition_order() {
         let manifest = manifest();
-        let mut plan = plan(&manifest);
-        for route in &mut plan.routes {
-            route.required_pairs = 2;
-        }
+        let plan = plan(&manifest);
         let canonical = schedule(&manifest, &plan);
         let mut entries = canonical.entries[..4].to_vec();
         for task_id in ["hold-locate", "hold-trace"] {
-            let block = canonical
+            let task_entries = canonical
                 .entries
                 .iter()
                 .filter(|entry| entry.task_id == task_id)
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut repetition_one = block.clone();
-            repetition_one.iter_mut().for_each(|entry| entry.repetition = 1);
-            let mut repetition_zero = block;
-            repetition_zero.iter_mut().for_each(|entry| entry.repetition = 0);
-            entries.extend(repetition_one);
-            entries.extend(repetition_zero);
+            entries.extend_from_slice(&task_entries[FinalArm::ALL.len()..FinalArm::ALL.len() * 2]);
+            entries.extend_from_slice(&task_entries[..FinalArm::ALL.len()]);
+            entries.extend_from_slice(&task_entries[FinalArm::ALL.len() * 2..]);
         }
         let mut reversed = canonical;
         reversed.entries = entries;

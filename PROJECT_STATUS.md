@@ -142,10 +142,13 @@ validation.
 - Linux and macOS lack live platform evidence.
 - The accepted economic results are calibrations, not a powered corpus or
   general savings claim. The public v4 benchmark manifest is answer-free and
-  synthetic; the offline protocol and synthetic evaluator fixture are complete,
-  but real private material, a non-synthetic validated PowerPlan, and a
-  provider run are absent. App provider execution remains fail-closed until an
-  isolated executor/broker consumes only ArmLaunch. This does not prove
+  synthetic. Deterministic power planning, exact schedule/observation binding,
+  fail-closed paired analysis, and the two-sided 95% BCa report path are
+  implemented and offline validated. The checked-in plan is reproducible from
+  explicitly synthetic calibration observations and remains permanently
+  claim-ineligible. Real private material, a non-synthetic validated PowerPlan,
+  and a provider run are absent. App provider execution remains fail-closed
+  until an isolated executor/broker consumes only ArmLaunch. This does not prove
   filesystem ACLs or process isolation; callers must keep private bundles
   unmounted and inaccessible to the runner identity.
 - No public beta, support channel, or compatibility window exists.

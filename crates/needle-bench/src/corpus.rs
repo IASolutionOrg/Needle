@@ -828,7 +828,7 @@ fn load_multi_task_campaign(
             errors.push("v2 campaign requires a validated schedule and power plan".to_owned());
             return None;
         };
-        if power_plan.campaign_digest != campaign_commitment(&campaign) {
+        if power_plan.campaign_commitment != campaign_commitment(&campaign) {
             errors.push("power plan campaign commitment differs from campaign".to_owned());
             return None;
         }
@@ -1265,7 +1265,7 @@ mod tests {
         assert!(report.campaign_valid);
         assert_eq!(
             report.cost_readiness.full_protocol_campaign_budget_estimate_microcredits,
-            Some(172_157_430)
+            Some(429_519_010)
         );
         assert!(!report.provider_inputs_ready);
         assert!(!report.provider_run_ready);
