@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(crate) const DEFAULT_MANIFEST: &str = "benchmarks/corpus/router-cache/manifest.json";
+pub(crate) const DEFAULT_LEGACY_OFFLINE_MANIFEST: &str =
+    "benchmarks/corpus/router-cache/legacy-offline-manifest.json";
 pub(crate) const DEFAULT_PRICING: &str = "fixtures/openai-codex-pricing-2026-07-27.json";
 const PILOT_TASK_ID: &str = "ripgrep-glob-case-insensitive-locate-calibration";
 pub(crate) const TRACE_REUSE_TASK_ID: &str = "ripgrep-crlf-trace-calibration";
@@ -210,12 +212,38 @@ fn arm_estimate(model: &CampaignCostModel, arm: FinalArm) -> Result<u64, AppErro
         .ok_or_else(|| AppError::Experiment(format!("cost estimate is missing {arm:?}")))
 }
 
+/// Provider/live entry point.  Neither the public v4 answer-free manifest nor
+/// a caller-supplied legacy manifest is executable by this runner: v4 still
+/// lacks the isolated evaluator boundary and v2/v3 are offline-only.
 pub(crate) fn load_protocol(manifest_path: &Path) -> Result<Protocol, AppError> {
+    let manifest_path = canonical_child_path(manifest_path)?;
+    let manifest: FrozenCorpusManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    if manifest.schema != "needle.frozen-corpus/4" {
+        return Err(AppError::Experiment(
+            "legacy frozen corpus manifests are restricted to the explicit offline replay loader"
+                .to_owned(),
+        ));
+    }
+    Err(AppError::Experiment(
+        "frozen corpus v4 requires an evaluator-owned production sealed bundle; provider execution is fail-closed in this runner"
+            .to_owned(),
+    ))
+}
+
+/// Explicit legacy offline loader used only by deterministic replay/simulator
+/// paths.  Keeping this separate from `load_protocol` prevents a caller-
+/// supplied v2/v3 manifest from reaching a provider/live command.
+pub(crate) fn load_legacy_offline_protocol(manifest_path: &Path) -> Result<Protocol, AppError> {
     let manifest_path = canonical_child_path(manifest_path)?;
     let directory = manifest_path
         .parent()
         .ok_or_else(|| AppError::Experiment("frozen corpus has no parent directory".to_owned()))?;
     let manifest: FrozenCorpusManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    if !matches!(manifest.schema.as_str(), "needle.frozen-corpus/2" | "needle.frozen-corpus/3") {
+        return Err(AppError::Experiment(
+            "legacy offline loader accepts only frozen corpus v2/v3 manifests".to_owned(),
+        ));
+    }
     let errors = validate_frozen_manifest(&manifest);
     if !errors.is_empty() {
         return Err(AppError::Experiment(format!(
@@ -567,7 +595,8 @@ mod tests {
 
     #[test]
     fn frozen_protocol_is_exactly_one_miss_then_one_hit() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         assert_eq!(protocol.pilot.paid_arms, [FinalArm::NeedleMiss, FinalArm::ExactHit]);
         assert_eq!(protocol.estimated_budget_microcredits, 10_936_895);
         assert_eq!(protocol.task().id, PILOT_TASK_ID);
@@ -575,7 +604,8 @@ mod tests {
 
     #[test]
     fn current_multi_task_budget_contains_only_the_two_paid_arms_and_reserves() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let budget = protocol.multi_task_stage_budget().unwrap();
         assert_eq!(protocol.campaign.task_ids.len(), 2);
         assert_eq!(budget.task_count, 2);
@@ -587,7 +617,8 @@ mod tests {
 
     #[test]
     fn natural_r43_answer_satisfies_the_public_quality_gate() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let spec = quality_spec(&protocol).unwrap();
         let response = "The primary implementation is `globs` in \
             `crates/core/flags/hiargs.rs` (lines 1209-1219). The focused test is \
@@ -598,7 +629,8 @@ mod tests {
 
     #[test]
     fn coverage_hit_oracle_does_not_require_an_unrequested_test() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let spec = coverage_hit_quality_spec(&protocol).unwrap();
         let response = "The primary implementation is in `crates/core/flags/hiargs.rs`.";
         let result = needle_bench::QualityOracleResult::evaluate(&spec, response, None);
@@ -608,7 +640,8 @@ mod tests {
 
     #[test]
     fn trace_campaign_oracle_accepts_declared_semantic_evidence_and_test_alternative() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let (task, oracle) = protocol.campaign_task("ripgrep-crlf-trace-calibration").unwrap();
         let spec = quality_spec_for_task(task, oracle).unwrap();
         let response = "`--crlf` is parsed in crates/core/flags/defs.rs. In \
@@ -620,7 +653,8 @@ mod tests {
 
     #[test]
     fn trace_campaign_oracle_rejects_an_incomplete_runtime_explanation() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         let (task, oracle) = protocol.campaign_task("ripgrep-crlf-trace-calibration").unwrap();
         let spec = quality_spec_for_task(task, oracle).unwrap();
         let response = "`--crlf` appears in crates/core/flags/defs.rs and \
@@ -628,5 +662,11 @@ mod tests {
         let result = needle_bench::QualityOracleResult::evaluate(&spec, response, None);
         assert!(!result.passed);
         assert_eq!(result.failures, vec!["required_claims"]);
+    }
+
+    #[test]
+    fn provider_loader_rejects_the_public_v4_manifest() {
+        let error = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap_err();
+        assert!(error.to_string().contains("evaluator-owned production sealed bundle"));
     }
 }

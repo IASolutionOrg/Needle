@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const MAX_CORPUS_TASKS: usize = 512;
+pub const MAX_CORPUS_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_CORPUS_IDENTIFIER_BYTES: usize = 256;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkRoute {
@@ -14,6 +18,33 @@ pub enum BenchmarkRoute {
 pub enum CorpusSplit {
     Calibration,
     Holdout,
+}
+
+/// Classification carried by a public corpus task.  Synthetic and legacy
+/// material is useful for deterministic/offline fixtures only and can never
+/// make a provider campaign ready.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusMaterialClass {
+    ProductionSealed,
+    Synthetic,
+    Legacy,
+}
+
+impl Default for CorpusMaterialClass {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
+/// A bounded, digest-bound focused-test policy.  The argv is intentionally
+/// not part of a public manifest or launch projection; it is resolved by the
+/// evaluator-owned sealed contract.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FocusedTestPolicyRef {
+    pub identity: String,
+    pub commitment: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -51,9 +82,22 @@ pub struct CorpusTask {
     pub repository_url: String,
     pub repository_sha: String,
     pub prompt: String,
-    pub oracle_path: String,
+    #[serde(default)]
+    pub material_class: CorpusMaterialClass,
+    #[serde(default)]
+    pub focused_test_policy: FocusedTestPolicyRef,
+    #[serde(default)]
+    pub oracle_schema: String,
     pub oracle_digest: String,
+
+    // These fields are retained only so archived v2/v3 readers and existing
+    // offline synthetic demos can be decoded.  They are never serialized in
+    // the v4 public manifest and are rejected for provider execution.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub oracle_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub test_identifier: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub focused_command: Vec<String>,
 }
 
@@ -71,6 +115,20 @@ pub struct FrozenCorpusManifest {
     pub campaign_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub campaign_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_plan_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_plan_digest: Option<String>,
+    /// Commitment to the evaluator contract/index.  It is deliberately a
+    /// digest only; no external bundle path or location is public.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_bundle_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_bundle_digest: Option<String>,
     pub tasks: Vec<CorpusTask>,
 }
 
@@ -168,6 +226,12 @@ pub fn evaluate_final_gate(
     bootstrap_seed: u64,
 ) -> FinalGateReport {
     let mut manifest_errors = validate_frozen_manifest(manifest);
+    if manifest.schema == "needle.frozen-corpus/4" {
+        manifest_errors.push(
+            "v4 final gate is unavailable until schedule-bound exact observations are integrated"
+                .to_owned(),
+        );
+    }
     manifest_errors.extend(validate_observations(manifest, observations));
     let manifest_valid = manifest_errors.is_empty();
     let routes = [BenchmarkRoute::LocateImplementation, BenchmarkRoute::TraceStateFlow]
@@ -190,6 +254,10 @@ pub fn evaluate_final_gate(
 
 pub fn validate_frozen_manifest(manifest: &FrozenCorpusManifest) -> Vec<String> {
     let mut errors = Vec::new();
+    if manifest.schema == "needle.frozen-corpus/4" {
+        validate_v4_manifest(manifest, &mut errors);
+        return errors;
+    }
     if !matches!(manifest.schema.as_str(), "needle.frozen-corpus/2" | "needle.frozen-corpus/3") {
         errors.push("unsupported frozen corpus schema".to_owned());
     }
@@ -228,7 +296,7 @@ pub fn validate_frozen_manifest(manifest: &FrozenCorpusManifest) -> Vec<String> 
     let mut tasks = BTreeMap::new();
     for task in &manifest.tasks {
         if tasks.insert(task.id.as_str(), task).is_some() {
-            errors.push(format!("duplicate corpus task `{}`", task.id));
+            errors.push("duplicate corpus task identifier".to_owned());
         }
         if task.repository_url.is_empty()
             || task.repository_sha.len() != 40
@@ -241,7 +309,7 @@ pub fn validate_frozen_manifest(manifest: &FrozenCorpusManifest) -> Vec<String> 
             || task.test_identifier.trim().is_empty()
             || task.focused_command.is_empty()
         {
-            errors.push(format!("corpus task `{}` is incomplete", task.id));
+            errors.push("corpus task metadata is incomplete or exceeds bounds".to_owned());
         }
         let expected_command = [
             "cargo",
@@ -268,6 +336,99 @@ pub fn validate_frozen_manifest(manifest: &FrozenCorpusManifest) -> Vec<String> 
         }
     }
     errors
+}
+
+fn validate_v4_manifest(manifest: &FrozenCorpusManifest, errors: &mut Vec<String>) {
+    if manifest.frozen_unix_ms == 0 {
+        errors.push("frozen corpus timestamp is missing".to_owned());
+    }
+    let configured_arms = manifest.arms.iter().copied().collect::<BTreeSet<_>>();
+    let required_arms = FinalArm::ALL.into_iter().collect::<BTreeSet<_>>();
+    if manifest.arms.len() != configured_arms.len() || configured_arms != required_arms {
+        errors.push("frozen corpus must configure every final arm exactly once".to_owned());
+    }
+    for (label, path, digest) in [
+        (
+            "cost model",
+            Some(manifest.cost_model_path.as_str()),
+            Some(manifest.cost_model_digest.as_str()),
+        ),
+        (
+            "minimal pilot",
+            Some(manifest.next_pilot_path.as_str()),
+            Some(manifest.next_pilot_digest.as_str()),
+        ),
+    ] {
+        if path.is_none_or(|value| !safe_relative_json_path(value))
+            || digest.is_none_or(|value| !valid_blake3_digest(value))
+        {
+            errors.push(format!("frozen corpus {label} reference is invalid"));
+        }
+    }
+    match (manifest.campaign_path.as_deref(), manifest.campaign_digest.as_deref()) {
+        (Some(path), Some(digest))
+            if safe_relative_json_path(path) && valid_blake3_digest(digest) => {}
+        _ => errors.push("frozen corpus v4 requires a valid campaign reference".to_owned()),
+    }
+    match (manifest.schedule_path.as_deref(), manifest.schedule_digest.as_deref()) {
+        (Some(path), Some(digest))
+            if safe_relative_json_path(path) && valid_blake3_digest(digest) => {}
+        _ => errors.push("frozen corpus v4 requires a valid schedule reference".to_owned()),
+    }
+    match (manifest.power_plan_path.as_deref(), manifest.power_plan_digest.as_deref()) {
+        (Some(path), Some(digest))
+            if safe_relative_json_path(path) && valid_blake3_digest(digest) => {}
+        _ => errors.push("frozen corpus v4 requires a valid power-plan reference".to_owned()),
+    }
+    match (manifest.sealed_bundle_schema.as_deref(), manifest.sealed_bundle_digest.as_deref()) {
+        (Some(schema), Some(digest))
+            if schema == "needle.sealed-oracle-index/1" && valid_blake3_digest(digest) => {}
+        _ => errors.push("frozen corpus v4 requires a sealed evaluator commitment".to_owned()),
+    }
+    if manifest.tasks.is_empty() || manifest.tasks.len() > MAX_CORPUS_TASKS {
+        errors.push("frozen corpus task count is out of bounds".to_owned());
+    }
+    let mut tasks = BTreeSet::new();
+    for task in &manifest.tasks {
+        if !tasks.insert(task.id.as_str()) {
+            errors.push("duplicate corpus task identifier".to_owned());
+        }
+        if task.id.len() > MAX_CORPUS_IDENTIFIER_BYTES
+            || task.repository_url.len() > 2_048
+            || task.prompt.len() > 4_000
+            || task.focused_test_policy.identity.len() > MAX_CORPUS_IDENTIFIER_BYTES
+            || task.oracle_schema.len() > MAX_CORPUS_IDENTIFIER_BYTES
+            || task.id.trim().is_empty()
+            || task.repository_url.trim().is_empty()
+            || task.repository_sha.len() != 40
+            || !task.repository_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || task.prompt.trim().len() < 40
+            || task.prompt.len() > 4_000
+            || task.prompt.contains("@@need")
+            || task.focused_test_policy.identity.trim().is_empty()
+            || !valid_blake3_digest(&task.focused_test_policy.commitment)
+            || task.oracle_schema != "needle.sealed-oracle/1"
+            || !valid_blake3_digest(&task.oracle_digest)
+        {
+            errors.push("corpus task metadata is incomplete or exceeds bounds".to_owned());
+        }
+        if !task.oracle_path.is_empty()
+            || !task.test_identifier.is_empty()
+            || !task.focused_command.is_empty()
+        {
+            errors.push("v4 corpus task contains legacy answer-bearing fields".to_owned());
+        }
+        if task.material_class == CorpusMaterialClass::Legacy {
+            errors.push("corpus task is legacy and provider-ineligible".to_owned());
+        }
+    }
+    for route in [BenchmarkRoute::LocateImplementation, BenchmarkRoute::TraceStateFlow] {
+        for split in [CorpusSplit::Calibration, CorpusSplit::Holdout] {
+            if !manifest.tasks.iter().any(|task| task.route == route && task.split == split) {
+                errors.push(format!("corpus is missing {route:?}/{split:?} tasks"));
+            }
+        }
+    }
 }
 
 fn validate_observations(
@@ -311,7 +472,7 @@ fn validate_observations(
 fn valid_blake3_digest(value: &str) -> bool {
     value.len() == 67
         && value.starts_with("b3:")
-        && value[3..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value[3..].bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn safe_relative_json_path(value: &str) -> bool {
@@ -507,6 +668,9 @@ mod tests {
                     prompt:
                         "Locate the implementation and provide a focused test for this behavior."
                             .to_owned(),
+                    material_class: CorpusMaterialClass::Legacy,
+                    focused_test_policy: FocusedTestPolicyRef::default(),
+                    oracle_schema: String::new(),
                     oracle_path: format!("oracles/{route:?}-{split:?}.json"),
                     oracle_digest:
                         "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -540,6 +704,12 @@ mod tests {
                 "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
             campaign_path: None,
             campaign_digest: None,
+            schedule_path: None,
+            schedule_digest: None,
+            power_plan_path: None,
+            power_plan_digest: None,
+            sealed_bundle_schema: None,
+            sealed_bundle_digest: None,
             tasks,
         }
     }
@@ -666,6 +836,42 @@ mod tests {
         manifest.campaign_digest =
             Some("b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned());
         assert!(validate_frozen_manifest(&manifest).is_empty());
+    }
+
+    #[test]
+    fn legacy_answer_fields_round_trip_but_v4_rejects_them() {
+        let legacy = manifest();
+        let encoded = serde_json::to_vec(&legacy).expect("legacy manifest serializes");
+        let decoded: FrozenCorpusManifest =
+            serde_json::from_slice(&encoded).expect("legacy manifest round-trips");
+        assert_eq!(decoded, legacy);
+
+        let mut v4 = legacy;
+        v4.schema = "needle.frozen-corpus/4".to_owned();
+        v4.tasks.iter_mut().for_each(|task| {
+            task.material_class = CorpusMaterialClass::Synthetic;
+            task.oracle_path.clear();
+            task.test_identifier.clear();
+            task.focused_command.clear();
+        });
+        let mut contaminated = v4.clone();
+        contaminated.tasks[0].oracle_path = "legacy.json".to_owned();
+        let errors = validate_frozen_manifest(&contaminated);
+        assert!(errors.iter().any(|error| error.contains("legacy answer-bearing")));
+    }
+
+    #[test]
+    fn v4_final_gate_is_explicitly_fail_closed() {
+        let mut manifest = manifest();
+        manifest.schema = "needle.frozen-corpus/4".to_owned();
+        let report = evaluate_final_gate(&manifest, &[], 1_000, 1);
+        assert!(!report.passed);
+        assert!(
+            report
+                .manifest_errors
+                .iter()
+                .any(|error| error.contains("schedule-bound exact observations"))
+        );
     }
 
     #[test]

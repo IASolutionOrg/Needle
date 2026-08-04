@@ -732,11 +732,21 @@ impl Drop for TemporaryRunRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::minimal_live_pilot::protocol::{
+        DEFAULT_LEGACY_OFFLINE_MANIFEST, load_legacy_offline_protocol,
+    };
 
     #[test]
     fn worker_budget_matches_the_accepted_historical_component() {
-        let protocol = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap();
+        let protocol =
+            load_legacy_offline_protocol(&workspace_path(DEFAULT_LEGACY_OFFLINE_MANIFEST)).unwrap();
         assert_eq!(worker_budget(&protocol).unwrap(), OBSERVED_WORKER_BUDGET_MICROCREDITS);
+    }
+
+    #[test]
+    fn provider_worker_loader_rejects_the_public_v4_manifest() {
+        let error = load_protocol(&workspace_path(DEFAULT_MANIFEST)).unwrap_err();
+        assert!(error.to_string().contains("evaluator-owned production sealed bundle"));
     }
 
     #[test]

@@ -41,6 +41,18 @@ Economic arms must share:
 - main model, reasoning, service tier, and pricing snapshot;
 - independent hidden quality oracle.
 
+Public corpus manifests use `needle.frozen-corpus/4`: they contain only
+answer-free prompts, source identities, policy commitments, and oracle
+commitments. Answer bytes and quality/test policy live in an evaluator-owned
+sealed bundle indexed outside the public manifest. The checked-in router-cache
+tasks and power plan are synthetic fixtures and are permanently ineligible for
+provider evidence.
+
+The app provider path remains fail-closed until an isolated executor/broker
+consumes only the bounded ArmLaunch projection. Evaluator callers must keep
+private sealed material unmounted and inaccessible to the runner identity; the
+offline protocol does not prove filesystem ACLs or process isolation.
+
 Wording may differ only when the compiled semantic need remains equivalent.
 Narrower, wider, residual, or mutation requests are separate cache-behavior
 experiments.
@@ -147,9 +159,10 @@ No powered corpus or publishable general savings interval exists.
 
 Before any provider run:
 
-1. freeze task, SHA, request, oracle, models, pricing, and retry policy;
+1. freeze task, SHA, request, oracle commitment, models, pricing, and retry policy;
 2. run deterministic simulator and current native preflight;
-3. verify source integrity and cleanup;
+3. verify the immutable schedule, validated PowerPlan, production sealed bundle,
+   source integrity, and cleanup;
 4. produce a complete cost estimate;
 5. obtain explicit human approval for that exact stage;
 6. execute once unless the approved protocol explicitly permits repetition.
