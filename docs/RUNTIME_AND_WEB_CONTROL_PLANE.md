@@ -68,8 +68,9 @@ This is a local development control plane, not a remotely hosted service.
 - Settings.
 
 The frontend uses React, TypeScript, Vite, React Router, TanStack Query,
-Tailwind, shadcn/ui patterns, and Recharts. Node.js 22 and npm are required to
-build the embedded assets; the running Rust binary does not invoke Node.js.
+Tailwind, shadcn/ui patterns, and Recharts. Node.js 22.22.0 or newer and npm are
+required to build the embedded assets; the running Rust binary does not invoke
+Node.js.
 
 ## API groups
 

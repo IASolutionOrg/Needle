@@ -37,7 +37,7 @@ Read:
 ## Prerequisites
 
 - Rust `1.90.0` with `rustfmt` and `clippy`;
-- Node.js `22` and npm for building the embedded frontend assets;
+- Node.js `22.22.0` or newer and npm for building the embedded frontend assets;
 - Codex `0.144.0` for adapter and App Server compatibility work.
 
 ```text

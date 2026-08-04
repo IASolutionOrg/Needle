@@ -8,7 +8,7 @@ import {
   Server,
 } from "lucide-react"
 import type { ReactNode } from "react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 
 import { useControlPlane } from "@/api"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
