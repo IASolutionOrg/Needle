@@ -23,38 +23,21 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/needle-app/web/package-lock.json
-      - name: Cache Rust dependencies and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            ${{ runner.os }}-rust-
       - name: Install web dependencies
         working-directory: crates/needle-app/web
         run: npm ci
-      - name: Verify web unit tests, lint and production bundle
+      - name: Test, type-check, lint, and build the web control plane
         working-directory: crates/needle-app/web
         run: |
           npm test
+          npm run typecheck
           npm run lint
           npm run build
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Upload web production bundle
         uses: actions/upload-artifact@v7
         with:
@@ -63,12 +46,24 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  checks:
-    needs: frontend-quality
+  rust-format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+  platform-checks:
+    needs: [frontend-quality, rust-format]
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["windows-latest", "ubuntu-latest", "macos-latest"]') }}
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -103,11 +98,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: crates/needle-app/web
         run: npm ci
-      - name: Check Windows-specific lints
-        if: matrix.os == 'windows-latest'
+      - name: Check Rust lints
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
-      - run: cargo build --locked --workspace
+      - name: Test the Rust workspace
+        run: cargo test --locked --workspace
+      - name: Build the Rust workspace
+        run: cargo build --locked --workspace
       - name: Cache Playwright browsers
         if: matrix.os == 'ubuntu-latest'
         uses: actions/cache@v6
@@ -124,5 +121,38 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: crates/needle-app/web
         run: npm run test:e2e:local
-      - run: cargo run --locked -p needle-app -- plugin package --output ci-plugin
-      - run: cargo run --locked -p needle-app -- plugin package --benchmark --output ci-benchmark-plugin
+      - name: Validate product and benchmark plugins
+        run: |
+          cargo run --locked -p needle-app -- plugin validate
+          cargo run --locked -p needle-app -- plugin validate --benchmark
+      - name: Package product and benchmark plugins
+        run: |
+          cargo run --locked -p needle-app -- plugin package --output ci-plugin
+          cargo run --locked -p needle-app -- plugin package --benchmark --output ci-benchmark-plugin
+
+  # Preserve the existing required-check context while making it cover every OS.
+  checks:
+    name: checks (ubuntu-latest)
+    if: always()
+    needs: [frontend-quality, rust-format, platform-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI stage
+        env:
+          FRONTEND_RESULT: ${{ needs['frontend-quality'].result }}
+          RUST_FORMAT_RESULT: ${{ needs['rust-format'].result }}
+          PLATFORM_RESULT: ${{ needs['platform-checks'].result }}
+        run: |
+          if [[ "$FRONTEND_RESULT" != "success" ]]; then
+            echo "::error::Frontend quality failed: $FRONTEND_RESULT"
+            exit 1
+          fi
+          if [[ "$RUST_FORMAT_RESULT" != "success" ]]; then
+            echo "::error::Rust formatting failed: $RUST_FORMAT_RESULT"
+            exit 1
+          fi
+          if [[ "$PLATFORM_RESULT" != "success" ]]; then
+            echo "::error::One or more platform checks failed: $PLATFORM_RESULT"
+            exit 1
+          fi
