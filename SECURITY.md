@@ -29,18 +29,10 @@ other sensitive information out of the public issue.
 For ordinary bugs, regressions, and feature requests, use the normal public
 issue or pull-request process instead of this security-reporting route.
 
-## Known dependency advisories
+## Resolved dependency advisories
 
-The installed `react-router-dom` version is `7.18.1`, which falls within the
-affected range (`>=7.12.0, <8.3.0`) of
-[GHSA-qwww-vcr4-c8h2](https://github.com/advisories/GHSA-qwww-vcr4-c8h2).
-Upstream describes this advisory as affecting unstable React Server Component
-(RSC) APIs. Needle's current Vite client-side SPA uses `BrowserRouter` and
-`createRoot` and does not enable those RSC APIs; this bounded non-exposure does
-not mean the dependency is generally safe.
-
-Upstream identifies `8.3.0` as the first patched release, but that release is
-not available from npm as of 2026-08-03. This is a temporary, scoped exception,
-not evidence of a completed security audit. Do not enable the affected RSC APIs;
-monitor for a published patched release, then upgrade and rerun `npm audit`,
-tests, lint, and build. Remove this exception once that validation succeeds.
+[GHSA-qwww-vcr4-c8h2](https://github.com/advisories/GHSA-qwww-vcr4-c8h2)
+was remediated by migrating the Vite client-side SPA from the removed
+`react-router-dom` package to `react-router` `8.3.0`. Needle does not enable the
+affected unstable React Server Component (RSC) APIs. This remediation does not
+constitute a completed third-party security audit.

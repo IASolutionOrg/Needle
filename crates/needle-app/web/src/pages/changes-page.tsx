@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react"
 import { ArrowLeft, FilePenLine } from "lucide-react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useParams } from "react-router"
 
 import {
   type ChangeAttempt,

@@ -10,7 +10,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react"
 import { useState } from "react"
-import { useParams } from "react-router-dom"
+import { useParams } from "react-router"
 
 import {
   type ControlPlane,

@@ -145,8 +145,8 @@ Requirements:
 
 - Rust `1.90.0` with `rustfmt` and `clippy`;
 - Codex `0.144.0` for the currently validated adapter;
-- Node.js `22` and npm for building the embedded frontend assets (Node is not
-  needed at runtime).
+- Node.js `22.22.0` or newer and npm for building the embedded frontend assets
+  (Node is not needed at runtime).
 
 ```text
 cd crates/needle-app/web

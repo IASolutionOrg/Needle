@@ -7,8 +7,8 @@ run. It is a development workflow, not a supported installation path.
 
 - Rust `1.90.0` with `rustfmt` and `clippy`;
 - Codex `0.144.0` for the currently validated App Server adapter;
-- Node.js `22` and npm for building the embedded frontend assets. Node.js is
-  not needed at runtime.
+- Node.js `22.22.0` or newer and npm for building the embedded frontend assets.
+  Node.js is not needed at runtime.
 
 ```text
 rustup toolchain install 1.90.0 --component rustfmt --component clippy

@@ -20,7 +20,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react"
-import { NavLink, useLocation } from "react-router-dom"
+import { NavLink, useLocation } from "react-router"
 
 import { useApprovalEvents, useControlPlane } from "@/api"
 import {
