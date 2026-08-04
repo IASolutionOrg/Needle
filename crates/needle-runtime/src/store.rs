@@ -25,10 +25,13 @@ use thiserror::Error;
 mod changes;
 #[path = "store/claims.rs"]
 mod claims;
+#[path = "store/lifecycles.rs"]
+mod lifecycles;
 #[path = "store/role_profiles.rs"]
 mod role_profiles;
 
 pub use changes::{ChangeAttemptRecord, PatchFileBlob, PreparedChangeRecord};
+pub use lifecycles::LifecycleProjection;
 pub use role_profiles::{
     RoleProfileAuditOperation, RoleProfileAuditRecord, RoleProfileStateRecord,
 };
@@ -884,6 +887,59 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_V16: &str = r#"
+CREATE TABLE change_lifecycles (
+    lifecycle_id TEXT NOT NULL UNIQUE CHECK(length(lifecycle_id) = 67),
+    change_id TEXT NOT NULL PRIMARY KEY REFERENCES change_requests(change_id),
+    source_snapshot_digest TEXT NOT NULL CHECK(length(source_snapshot_digest) = 67),
+    state_digest TEXT NOT NULL CHECK(length(state_digest) = 67),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    state_json TEXT NOT NULL CHECK(length(state_json) <= 65536),
+    created_unix_ms INTEGER NOT NULL CHECK(created_unix_ms >= 0),
+    updated_unix_ms INTEGER NOT NULL CHECK(updated_unix_ms >= created_unix_ms)
+);
+ALTER TABLE change_events ADD COLUMN lifecycle_sequence INTEGER;
+CREATE UNIQUE INDEX change_events_lifecycle_sequence
+    ON change_events(change_id, lifecycle_sequence)
+    WHERE lifecycle_sequence IS NOT NULL;
+CREATE TRIGGER change_lifecycles_transition_shape
+BEFORE UPDATE ON change_lifecycles
+WHEN NEW.lifecycle_id <> OLD.lifecycle_id
+  OR NEW.change_id <> OLD.change_id
+  OR NEW.source_snapshot_digest <> OLD.source_snapshot_digest
+  OR NEW.created_unix_ms <> OLD.created_unix_ms
+  OR NEW.generation <> OLD.generation + 1
+  OR NEW.updated_unix_ms < OLD.updated_unix_ms
+BEGIN
+    SELECT RAISE(ABORT, 'invalid lifecycle projection transition');
+END;
+CREATE TRIGGER change_lifecycles_no_delete
+BEFORE DELETE ON change_lifecycles
+BEGIN
+    SELECT RAISE(ABORT, 'lifecycle projections are durable');
+END;
+CREATE TRIGGER change_events_no_update
+BEFORE UPDATE ON change_events
+BEGIN
+    SELECT RAISE(ABORT, 'change events are append-only');
+END;
+CREATE TRIGGER change_events_no_delete
+BEFORE DELETE ON change_events
+BEGIN
+    SELECT RAISE(ABORT, 'change events are append-only');
+END;
+CREATE TRIGGER lifecycle_event_payload_bound
+BEFORE INSERT ON change_events
+WHEN NEW.lifecycle_sequence IS NOT NULL AND (
+    length(NEW.event_type) NOT BETWEEN 1 AND 64
+    OR length(NEW.payload_digest) != 67
+    OR length(NEW.payload_json) > 65536
+)
+BEGIN
+    SELECT RAISE(ABORT, 'lifecycle event exceeds persisted bounds');
+END;
+"#;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database operation failed: {0}")]
@@ -928,6 +984,14 @@ pub enum StoreError {
     RoleProfileConflict(String),
     #[error("role profile was not found: {0}")]
     RoleProfileNotFound(String),
+    #[error("lifecycle validation failed: {0}")]
+    Lifecycle(#[from] needle_core::LifecycleError),
+    #[error("lifecycle operation conflicts: {0}")]
+    LifecycleConflict(String),
+    #[error("lifecycle was not found: {0}")]
+    LifecycleNotFound(String),
+    #[error("stored lifecycle is corrupt: {0}")]
+    LifecycleCorruption(String),
     #[error("database connection lock was poisoned")]
     ConnectionLock,
 }
@@ -1251,6 +1315,7 @@ impl RuntimeStore {
         apply_migration(&mut connection, 13, MIGRATION_V13)?;
         apply_migration(&mut connection, 14, MIGRATION_V14)?;
         apply_migration(&mut connection, 15, MIGRATION_V15)?;
+        apply_migration(&mut connection, 16, MIGRATION_V16)?;
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('utility_gate_passed', '0')",
             [],
@@ -5177,7 +5242,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         let columns = connection
             .prepare("PRAGMA table_info(worker_runs)")
             .unwrap()
@@ -5284,6 +5349,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v13_tables, 7);
+        let v16_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='change_lifecycles'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v16_tables, 1);
+        let event_columns = connection
+            .prepare("PRAGMA table_info(change_events)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(event_columns.iter().any(|column| column == "lifecycle_sequence"));
         drop(connection);
         let _ = fs::remove_file(path);
     }

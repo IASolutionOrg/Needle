@@ -60,6 +60,30 @@ The verifier:
 Infrastructure failure or missing required evidence is `inconclusive`, never
 `verified`.
 
+## Parent-owned lifecycle contract
+
+A change may opt into the durable depth-one sequence
+`explore -> implement -> test -> review -> verify -> apply`. Creation is allowed
+only before the first patch and binds the immutable change/source identity to
+active role-profile revisions and parent-selected certified test plans from the
+same source snapshot.
+
+The parent advances the lifecycle with the current state digest. Each worker
+phase checks its frozen profile, depth-one completion, cumulative budget, and
+typed persisted artifact. Review records redacted acceptance coverage and is
+not verifier evidence. Verify accepts only the current canonical verification
+artifact from the frozen verifier definition. Failed or unavailable tests,
+missing artifacts, stale digests, skipped phases, duplicate completion, and a
+second repair all fail closed without a partial transition.
+
+Lifecycle projection and append-only events share the existing change journal.
+Every parent transition persists its projection and event atomically. Patch and
+verification artifacts must already exist, so a crash before their parent
+transition leaves the phase unchanged; repair and apply lifecycle transitions
+are atomic with their change-journal mutation. Restart replay must equal the
+stored projection. This is an offline runtime contract. It does not wire Codex
+worker processes or add a lifecycle HTTP/UI surface.
+
 ## One repair
 
 The first `repairable` verdict may reserve one repair transactionally. A new
@@ -79,6 +103,9 @@ MCP deliberately has no apply tool. The local control plane requires:
 4. valid session cookie and CSRF;
 5. exact `If-Match` change digest;
 6. active source snapshot equal to the preparation base.
+
+For a lifecycle-bound change, apply also requires the exact approved lifecycle
+state digest. The legacy apply entry point cannot bypass that requirement.
 
 Apply operations are serialized and journaled before the first write. Failure
 restores persisted before blobs and verifies the pre-apply snapshot. Drift,
