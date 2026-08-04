@@ -4,6 +4,7 @@ mod approval;
 mod artifact_cache;
 mod changes;
 mod claim_proof;
+mod lifecycle_executor;
 mod model_ladder;
 mod orchestrator;
 mod proof;
@@ -25,12 +26,12 @@ pub use snapshot::{
     validate_need_result,
 };
 pub use store::{
-    CacheRecord, ChangeAttemptRecord, ConfigExport, LifecycleProjection, MainTurnObservationRecord,
-    NeedShadowRecord, NeedShadowWrite, NeedStepEventRecord, NeedStepRequestRecord,
-    NegativeAttemptRecord, OperatorCostKey, OperatorCostObservation, PatchFileBlob,
-    PreparedChangeRecord, ProofAccountingRecord, RoleProfileAuditOperation, RoleProfileAuditRecord,
-    RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord, RuntimeSettings,
-    RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
+    CacheRecord, ChangeAttemptRecord, ConfigExport, LifecycleChangeContext, LifecycleProjection,
+    MainTurnObservationRecord, NeedShadowRecord, NeedShadowWrite, NeedStepEventRecord,
+    NeedStepRequestRecord, NegativeAttemptRecord, OperatorCostKey, OperatorCostObservation,
+    PatchFileBlob, PreparedChangeRecord, ProofAccountingRecord, RoleProfileAuditOperation,
+    RoleProfileAuditRecord, RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord,
+    RuntimeSettings, RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
 };
 
 use needle_core::{NeedKey, Preset, Route, RouteMatcher};
@@ -88,6 +89,15 @@ pub use claim_proof::{
     ClaimProofError, ClaimProofMaterial, build_claim_component_certificate,
     build_claim_set_certificate, claim_proof_engine_definition,
     claim_validation_certificate_is_fresh, replay_claim_set_certificate,
+};
+pub use lifecycle_executor::{
+    LIFECYCLE_ADAPTER_OUTCOME_SCHEMA, LIFECYCLE_ADAPTER_REQUEST_SCHEMA, LifecycleAdapterCleanup,
+    LifecycleAdapterFailure, LifecycleAdapterResult, LifecycleCancellation,
+    LifecycleExecutionDisposition, LifecycleExecutionError, LifecycleExecutionKernel,
+    LifecycleExecutionOutcome, LifecyclePhaseAdapter, LifecyclePhaseAdapterOutcome,
+    LifecyclePhaseAdapterRequest, LifecyclePhaseAdapters, LifecycleRemainingBudget,
+    MAX_LIFECYCLE_ADAPTER_DETAIL_BYTES, MAX_LIFECYCLE_ADAPTER_OUTCOME_BYTES,
+    MAX_LIFECYCLE_ADAPTER_REQUEST_BYTES, NeverCancel,
 };
 pub use model_ladder::{
     LadderAttempt, LadderAttemptRecord, ModelLadder, ModelLadderError, ModelLadderOutcome,

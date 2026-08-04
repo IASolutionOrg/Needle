@@ -98,6 +98,15 @@ pub struct PreparedChangeRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct LifecycleChangeContext {
+    pub request: ChangeRequest,
+    pub request_digest: Digest,
+    pub repository_id: Digest,
+    pub source_snapshot: Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChangeAttemptRecord {
     pub role: String,
     pub patch_id: PatchId,
@@ -109,6 +118,40 @@ pub struct ChangeAttemptRecord {
 }
 
 impl RuntimeStore {
+    pub fn lifecycle_change_context(
+        &self,
+        change_id: &ChangeId,
+    ) -> Result<Option<LifecycleChangeContext>, StoreError> {
+        let connection = self.connection()?;
+        let row: Option<(String, String, String, String)> = connection
+            .query_row(
+                "SELECT request_digest, repository_id, source_snapshot_digest, request_json
+                 FROM change_requests WHERE change_id=?1",
+                [change_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((request_digest, repository_id, source_snapshot, request_json)) = row else {
+            return Ok(None);
+        };
+        let request_digest = Digest::parse(&request_digest)
+            .map_err(|_| StoreError::LifecycleCorruption(format!("{change_id}: request digest")))?;
+        let repository_id = Digest::parse(&repository_id).map_err(|_| {
+            StoreError::LifecycleCorruption(format!("{change_id}: repository digest"))
+        })?;
+        let source_snapshot = Digest::parse(&source_snapshot)
+            .map_err(|_| StoreError::LifecycleCorruption(format!("{change_id}: source digest")))?;
+        let request: ChangeRequest = serde_json::from_str(&request_json).map_err(|_| {
+            StoreError::LifecycleCorruption(format!("{change_id}: immutable request JSON"))
+        })?;
+        if request.digest(source_snapshot) != request_digest {
+            return Err(StoreError::LifecycleCorruption(format!(
+                "{change_id}: immutable request digest"
+            )));
+        }
+        Ok(Some(LifecycleChangeContext { request, request_digest, repository_id, source_snapshot }))
+    }
+
     pub fn record_change_request(
         &self,
         change_id: &ChangeId,
@@ -1373,6 +1416,66 @@ mod tests {
             .activate_role_profile(&revision.profile_id, revision.revision, state.state_digest)
             .unwrap();
         RoleProfileProvenance::from_revision(&revision).unwrap()
+    }
+
+    #[test]
+    fn lifecycle_change_context_round_trips_and_rejects_a_digest_mismatch() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "needle-lifecycle-change-context-{}-{suffix}.sqlite3",
+            std::process::id()
+        ));
+        let store = RuntimeStore::new(&path);
+        store.initialize().unwrap();
+        let source_snapshot = Digest::blake3(b"lifecycle-context-source");
+        let repository_id = Digest::blake3(b"lifecycle-context-repository");
+        let request = ChangeRequest {
+            task: "Run a bounded lifecycle adapter.".to_owned(),
+            acceptance_criteria: vec!["The immutable request is preserved.".to_owned()],
+            allowed_paths: Vec::new(),
+            artifact_ids: Vec::new(),
+            claim_ids: Vec::new(),
+            constraints: Vec::new(),
+        };
+        let change_id = ChangeId::from_digest(Digest::blake3(b"lifecycle-context-change"));
+        let request_digest = request.digest(source_snapshot);
+        store
+            .record_change_request(
+                &change_id,
+                repository_id,
+                source_snapshot,
+                request_digest,
+                &request,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.lifecycle_change_context(&change_id).unwrap(),
+            Some(LifecycleChangeContext {
+                request: request.clone(),
+                request_digest,
+                repository_id,
+                source_snapshot,
+            })
+        );
+
+        let mismatched_id = ChangeId::from_digest(Digest::blake3(b"lifecycle-context-mismatch"));
+        store
+            .record_change_request(
+                &mismatched_id,
+                repository_id,
+                source_snapshot,
+                Digest::blake3(b"wrong-request-digest"),
+                &request,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.lifecycle_change_context(&mismatched_id),
+            Err(StoreError::LifecycleCorruption(_))
+        ));
+
+        drop(store);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -29,8 +29,8 @@ one.
 | Multi-need and structured MCP | Sequential and steer delivery, bounded ledger, structured JSON tools, cancellation, shared resolver | App Server simulator and one structured MCP cache-hit observation | **Implemented; offline validated; live calibration** |
 | Claim-level reuse | Validator-extracted claims, claim proofs, mixed planning, and bounded authoritative location, runtime-flow, and focused-test claims | Deterministic freshness, mutation, negative, projection, economics, and performance cases | **Implemented; offline validated** |
 | Verified changes | Isolated patch preparation, independent verifier, one repair, explicit journaled apply | Simulator and focused persistence, isolation, drift, and recovery tests | **Implemented; offline validated** |
-| Codex role-profile control plane | Canonical Codex role definitions, bounded policies, immutable revisions, state-digest CAS, SQLite persistence, audit records, explicit WorkerProfile projection, bounded digest-bound HTTP API, local editor, and frozen session/worker/cache provenance | Focused deterministic Rust and frontend tests; no parent-owned lifecycle execution | **Implemented; offline validated** |
-| Codex development lifecycle contract | Durable depth-one `explore -> implement -> test -> review -> verify -> apply` state machine, frozen role-profile/test-plan anchors, budgets, cancellation, one repair, explicit approval, transactional SQLite projection/events, restart replay, and journaled apply integration; Codex executor and lifecycle UI are not wired | Deterministic transition matrix, adversarial domain tests, persistence/restart tests, and concurrent apply serialization without provider calls | **Implemented; offline validated** |
+| Codex role-profile control plane | Canonical Codex role definitions, bounded policies, immutable revisions, state-digest CAS, SQLite persistence, audit records, explicit WorkerProfile projection, bounded digest-bound HTTP API, local editor, and frozen session/worker/cache provenance | Focused deterministic Rust and frontend tests; lifecycle execution uses only injected adapters, not concrete Codex processes | **Implemented; offline validated** |
+| Codex development lifecycle contract | Durable depth-one `explore -> implement -> test -> review -> verify -> apply` state machine, frozen role-profile/test-plan anchors, budgets, cancellation, one repair, explicit approval, transactional SQLite projection/events, restart replay, journaled apply integration, and a parent-owned injected-adapter execution kernel; concrete Codex adapters and lifecycle UI are not wired | Deterministic transition matrix, adversarial domain/store tests, fake-adapter execution, repair, cancellation, stale-CAS, and restart tests without provider calls | **Implemented; offline validated** |
 | Other-host subagent configuration | Configuration-only interoperability is planned for Claude Code and Cursor, followed by OpenCode and Antigravity | Not available | **Pending** |
 | Multi-host orchestration | Execution remains Codex-only; non-Codex execution follows configuration interoperability, a host contract, and conformance evidence | Not available | **Pending** |
 | Release readiness | Stable packaging, supported installation, compatibility policy, second live platform, powered corpus | Not available | **Pending** |
@@ -63,7 +63,7 @@ provider-backed claim-authority observation exists.
 | Canonical named Codex role-profile domain and revision store | **Implemented; offline validated** |
 | Named role-profile HTTP/editor | **Implemented; offline validated; configuration mutations only** |
 | Role-profile session, worker, cache, attempt, and audit provenance | **Implemented; offline validated; Codex-first** |
-| Parent-owned lifecycle domain and change-journal integration | **Implemented; offline validated; executor pending** |
+| Parent-owned lifecycle domain, change-journal integration, and injected-adapter kernel | **Implemented; offline validated; concrete adapters pending** |
 | Non-Codex subagent configuration | **Pending; configuration only before execution** |
 | Non-Codex execution and orchestration | **Pending; later milestone** |
 | Stable public API or configuration compatibility | **Pending** |
@@ -127,10 +127,10 @@ validation.
 - Verified changes have no provider-backed patcher or verifier observation.
 - Canonical role-profile definitions, revision persistence, bounded HTTP/editor
   flows, request-time preflight, frozen session/worker/cache/attempt/audit
-  provenance, and the parent-owned lifecycle domain/journal are implemented and
-  offline validated. The lifecycle contract does not launch or supervise Codex
-  workers and has no read/timeline UI; automatic profile activation remains
-  unsupported and activation is an explicit configuration change.
+  provenance, and the parent-owned lifecycle domain/journal and injected-adapter
+  kernel are implemented and offline validated. No concrete adapter launches or
+  supervises Codex workers, and there is no read/timeline UI; automatic profile
+  activation remains unsupported and activation is an explicit configuration change.
 - The verifier handles a deterministic serial set of up to four distinct
   associated certified test plans; exact duplicates collapse to one execution,
   while over-cap and unavailable plans fail closed. This behavior is offline
