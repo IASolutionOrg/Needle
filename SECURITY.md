@@ -36,3 +36,14 @@ was remediated by migrating the Vite client-side SPA from the removed
 `react-router-dom` package to `react-router` `8.3.0`. Needle does not enable the
 affected unstable React Server Component (RSC) APIs. This remediation does not
 constitute a completed third-party security audit.
+
+[GHSA-rgw5-rvv9-x895](https://github.com/advisories/GHSA-rgw5-rvv9-x895)
+was remediated by updating the development-only transitive dependency
+`brace-expansion` from `5.0.8` to `5.0.9`. The package is used by frontend
+tooling and is not included in the embedded production bundle.
+
+[RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html)
+was remediated by disabling the unused default features of `statrs` in
+`needle-bench`, removing the transitive `nalgebra` -> `simba` -> `paste`
+dependency chain. Needle uses only the `Normal` and `ContinuousCDF` APIs, which
+do not require those features.
