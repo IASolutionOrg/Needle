@@ -113,7 +113,11 @@ transition through digest CAS. Deterministic invocation identities let adapters
 deduplicate side effects after an uncommitted attempt; replay prevents a
 committed phase from running again. The kernel consumes the one transactional
 repair reservation and stops at `apply/awaiting_approval`. Concrete Codex
-process adapters and the lifecycle read UI remain separate consumers.
+process adapters and the lifecycle read UI remain separate consumers. The app
+exposes authenticated versioned `GET` routes for bounded lifecycle summaries,
+detail, and ordered events. Those routes replay the persisted journal before
+responding and project explicit safe DTOs rather than serializing lifecycle,
+event, apply-journal, or host-local storage records directly.
 
 ## Request flow
 

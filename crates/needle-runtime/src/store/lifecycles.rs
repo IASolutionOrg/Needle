@@ -3,8 +3,8 @@ use needle_core::{
     ApprovalDecisionSource, ChangeApplyId, ChangeApplyStatus, ChangeId, ChangeRequest, CodexRole,
     CommandExecutionEvidence, DevelopmentLifecycle, Digest, LifecycleApplyApproval, LifecycleError,
     LifecycleEvent, LifecyclePhase, LifecycleReason, LifecycleSpec, LifecycleStatus,
-    LifecycleTransition, LifecycleWorkerProfiles, PatchId, ReviewArtifact, RoleProfileProvenance,
-    VerificationArtifact, VerificationArtifactId,
+    LifecycleTerminalOutcome, LifecycleTransition, LifecycleUsage, LifecycleWorkerProfiles,
+    PatchId, ReviewArtifact, RoleProfileProvenance, VerificationArtifact, VerificationArtifactId,
 };
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,50 @@ type LifecycleChangeAnchors =
     (String, String, u64, bool, Option<String>, Option<u64>, Option<String>);
 type LifecycleProjectionRow = (String, String, String, String, u64);
 
+pub const MAX_LIFECYCLE_LIST_LIMIT: usize = 100;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleProjection {
     pub lifecycle: DevelopmentLifecycle,
     pub state_digest: Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleSummaryRecord {
+    pub lifecycle_id: needle_core::LifecycleId,
+    pub change_id: ChangeId,
+    pub source_snapshot: Digest,
+    pub phase: LifecyclePhase,
+    pub status: LifecycleStatus,
+    pub state_digest: Digest,
+    pub generation: u64,
+    pub usage: LifecycleUsage,
+    pub terminal_outcome: Option<LifecycleTerminalOutcome>,
+    pub terminal_reason: Option<LifecycleReason>,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+}
+
+impl LifecycleSummaryRecord {
+    fn from_projection(projection: LifecycleProjection) -> Self {
+        let lifecycle = projection.lifecycle;
+        Self {
+            lifecycle_id: lifecycle.id,
+            change_id: lifecycle.change_id,
+            source_snapshot: lifecycle.source_snapshot,
+            phase: lifecycle.phase,
+            status: lifecycle.status,
+            state_digest: projection.state_digest,
+            generation: lifecycle.generation,
+            usage: lifecycle.usage,
+            terminal_outcome: lifecycle.terminal_outcome,
+            terminal_reason: lifecycle.terminal_reason,
+            created_unix_ms: lifecycle.created_unix_ms,
+            updated_unix_ms: lifecycle.updated_unix_ms,
+        }
+    }
 }
 
 impl LifecycleProjection {
@@ -126,60 +165,75 @@ impl RuntimeStore {
         lifecycle_projection_in_transaction(&*connection, change_id)
     }
 
+    /// Return validated lifecycle summaries ordered by canonical change identity.
+    ///
+    /// Every selected lifecycle is replayed against its bounded journal before
+    /// projection, so corruption is returned instead of hidden by a partial list.
+    pub fn list_lifecycle_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LifecycleSummaryRecord>, StoreError> {
+        if limit == 0 || limit > MAX_LIFECYCLE_LIST_LIMIT {
+            return Err(StoreError::LifecycleQuery(format!(
+                "limit must be between 1 and {MAX_LIFECYCLE_LIST_LIMIT}"
+            )));
+        }
+        self.initialize()?;
+        let mut connection = self.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let ids = {
+            let mut statement = transaction.prepare(
+                "SELECT change_id FROM change_lifecycles ORDER BY change_id ASC LIMIT ?1",
+            )?;
+            statement
+                .query_map([limit as u64], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut summaries = Vec::with_capacity(ids.len());
+        for raw_id in ids {
+            let change_id = ChangeId::parse(&raw_id).map_err(|_| {
+                StoreError::LifecycleCorruption("lifecycle list change identity".to_owned())
+            })?;
+            let projection = replay_lifecycle_in_transaction(&transaction, &change_id)?;
+            summaries.push(LifecycleSummaryRecord::from_projection(projection));
+        }
+        transaction.commit()?;
+        Ok(summaries)
+    }
+
     pub fn lifecycle_events(
         &self,
         change_id: &ChangeId,
     ) -> Result<Vec<LifecycleEvent>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT payload_json, payload_digest FROM change_events
-             WHERE change_id=?1 AND lifecycle_sequence IS NOT NULL
-             ORDER BY lifecycle_sequence LIMIT ?2",
-        )?;
-        let events = statement
-            .query_map(
-                params![change_id.to_string(), needle_core::MAX_LIFECYCLE_EVENTS + 1],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?
-            .map(|row| {
-                let (json, stored_digest) = row?;
-                if Digest::blake3(json.as_bytes()).to_string() != stored_digest {
-                    return Err(StoreError::LifecycleCorruption(format!(
-                        "{change_id}: lifecycle event payload digest"
-                    )));
-                }
-                let event: LifecycleEvent = serde_json::from_str(&json)?;
-                if event.change_id != *change_id {
-                    return Err(StoreError::LifecycleCorruption(format!(
-                        "{change_id}: lifecycle event change identity"
-                    )));
-                }
-                Ok(event)
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        if events.len() > needle_core::MAX_LIFECYCLE_EVENTS {
-            return Err(StoreError::LifecycleCorruption(format!(
-                "{change_id}: lifecycle event count"
-            )));
-        }
-        Ok(events)
+        lifecycle_events_in_connection(&connection, change_id)
     }
 
     pub fn replay_lifecycle(
         &self,
         change_id: &ChangeId,
     ) -> Result<LifecycleProjection, StoreError> {
-        let persisted = self
-            .lifecycle(change_id)?
-            .ok_or_else(|| StoreError::LifecycleNotFound(change_id.to_string()))?;
-        let replayed = DevelopmentLifecycle::replay(&self.lifecycle_events(change_id)?)?;
-        let replayed = LifecycleProjection::new(replayed)?;
-        if replayed != persisted {
-            return Err(StoreError::LifecycleCorruption(format!(
-                "{change_id}: event replay differs from current projection"
-            )));
-        }
-        Ok(replayed)
+        let mut connection = self.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let projection = replay_lifecycle_in_transaction(&transaction, change_id)?;
+        transaction.commit()?;
+        Ok(projection)
+    }
+
+    /// Return the canonical ordered journal after replaying it against the
+    /// persisted lifecycle projection in one read transaction.
+    pub fn replay_lifecycle_events(
+        &self,
+        change_id: &ChangeId,
+    ) -> Result<Vec<LifecycleEvent>, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let (_, events) = replay_lifecycle_and_events_in_transaction(&transaction, change_id)?;
+        transaction.commit()?;
+        Ok(events)
     }
 
     /// Parent-owned transition boundary. Worker outputs are data carried by a
@@ -477,6 +531,68 @@ fn lifecycle_projection_in_transaction<C: LifecycleConnection>(
         return Err(StoreError::LifecycleCorruption(change_id.to_string()));
     }
     Ok(Some(LifecycleProjection { lifecycle, state_digest }))
+}
+
+fn lifecycle_events_in_connection(
+    connection: &rusqlite::Connection,
+    change_id: &ChangeId,
+) -> Result<Vec<LifecycleEvent>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT payload_json, payload_digest FROM change_events
+         WHERE change_id=?1 AND lifecycle_sequence IS NOT NULL
+         ORDER BY lifecycle_sequence LIMIT ?2",
+    )?;
+    let events = statement
+        .query_map(params![change_id.to_string(), needle_core::MAX_LIFECYCLE_EVENTS + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .map(|row| {
+            let (json, stored_digest) = row?;
+            if Digest::blake3(json.as_bytes()).to_string() != stored_digest {
+                return Err(StoreError::LifecycleCorruption(format!(
+                    "{change_id}: lifecycle event payload digest"
+                )));
+            }
+            let event: LifecycleEvent = serde_json::from_str(&json).map_err(|_| {
+                StoreError::LifecycleCorruption(format!("{change_id}: lifecycle event JSON"))
+            })?;
+            if event.change_id != *change_id {
+                return Err(StoreError::LifecycleCorruption(format!(
+                    "{change_id}: lifecycle event change identity"
+                )));
+            }
+            Ok(event)
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    if events.len() > needle_core::MAX_LIFECYCLE_EVENTS {
+        return Err(StoreError::LifecycleCorruption(format!("{change_id}: lifecycle event count")));
+    }
+    Ok(events)
+}
+
+fn replay_lifecycle_in_transaction(
+    transaction: &Transaction<'_>,
+    change_id: &ChangeId,
+) -> Result<LifecycleProjection, StoreError> {
+    replay_lifecycle_and_events_in_transaction(transaction, change_id)
+        .map(|(projection, _)| projection)
+}
+
+fn replay_lifecycle_and_events_in_transaction(
+    transaction: &Transaction<'_>,
+    change_id: &ChangeId,
+) -> Result<(LifecycleProjection, Vec<LifecycleEvent>), StoreError> {
+    let persisted = lifecycle_projection_in_transaction(transaction, change_id)?
+        .ok_or_else(|| StoreError::LifecycleNotFound(change_id.to_string()))?;
+    let events = lifecycle_events_in_connection(transaction, change_id)?;
+    let replayed = DevelopmentLifecycle::replay(&events)?;
+    let replayed = LifecycleProjection::new(replayed)?;
+    if replayed != persisted {
+        return Err(StoreError::LifecycleCorruption(format!(
+            "{change_id}: event replay differs from current projection"
+        )));
+    }
+    Ok((replayed, events))
 }
 
 fn persist_transition(

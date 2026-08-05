@@ -84,7 +84,13 @@ are atomic with their change-journal mutation. Restart replay must equal the
 stored projection. Runtime's parent-owned kernel selects one validated phase,
 invokes one injected depth-one adapter with a deterministic invocation identity,
 and commits through digest CAS. It stops at `apply/awaiting_approval`. Concrete
-Codex worker processes and a lifecycle HTTP/UI surface remain unwired.
+Codex worker processes and a lifecycle UI remain unwired. An authenticated,
+versioned read-only HTTP surface now lists bounded deterministic summaries and
+returns lifecycle detail or ordered events after validating projection and
+journal replay. Explicit DTOs expose only bounded identities, usage, artifact
+references, terminal reasons, and redacted recovery state; internal rows,
+request/test command data, repository roots, journals, blobs, and transcripts
+are not serialized.
 
 ## One repair
 

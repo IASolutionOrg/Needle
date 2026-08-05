@@ -1269,6 +1269,25 @@ impl RuntimeStore {
             .map_err(StoreError::from)
     }
 
+    pub fn latest_change_apply(
+        &self,
+        change_id: &ChangeId,
+    ) -> Result<Option<ChangeApplyRecord>, StoreError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT apply_id, change_id, patch_id, repository_root,
+                        pre_snapshot_digest, post_snapshot_digest, status,
+                        created_unix_ms, completed_unix_ms
+                 FROM change_applies WHERE change_id=?1
+                 ORDER BY created_unix_ms DESC, apply_id DESC LIMIT 1",
+                [change_id.to_string()],
+                decode_apply_record,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     pub fn change_applies(
         &self,
         change_id: &ChangeId,
