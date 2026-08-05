@@ -178,7 +178,6 @@ impl RuntimeStore {
                 "limit must be between 1 and {MAX_LIFECYCLE_LIST_LIMIT}"
             )));
         }
-        self.initialize()?;
         let mut connection = self.connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
