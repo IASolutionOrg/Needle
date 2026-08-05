@@ -86,6 +86,10 @@ Node.js.
 - request-time role-profile preflight and digest-bound draft/activation lifecycle:
   `POST /api/v1/role-profiles/{id}/preflight`, `/draft`, `/activate`, and
   `/deactivate`;
+- bounded read-only lifecycle inspection:
+  `GET /api/v1/lifecycles`,
+  `GET /api/v1/lifecycles/{change_id}`, and
+  `GET /api/v1/lifecycles/{change_id}/events`;
 - cache inspection and invalidation;
 - run, artifact, usage, and promotion views.
 
@@ -98,6 +102,15 @@ same-session CSRF boundary and an exact quoted `If-Match` state digest; 428
 means missing and 412 means stale. Activation additionally requires explicit
 confirmation of the selected revision and definition digest. The envelope is
 Codex configuration-only; non-Codex hosts are reported unavailable.
+
+Lifecycle responses use versioned list, detail, and event schemas. Lists accept
+an optional `limit` from 1 through 100 and use canonical change-ID ordering;
+event responses retain the domain journal's hard event bound and sequence.
+Every selected lifecycle is replayed before projection. Response DTOs expose
+bounded identities, state, usage, artifact references, terminal reasons, and
+redacted recovery status while omitting executable test commands, request text,
+internal event payloads, apply journals, repository roots, blobs, transcripts,
+and credentials. These routes are GET-only and do not mutate lifecycle state.
 
 ### Approvals
 

@@ -28,6 +28,8 @@ use std::time::Duration;
 
 use crate::runtime_instance::InstanceGuard;
 
+#[path = "server/lifecycles.rs"]
+mod lifecycles;
 #[path = "server/role_profiles.rs"]
 mod role_profiles;
 
@@ -221,7 +223,7 @@ pub(crate) fn run(data_directory: PathBuf, repository_root: PathBuf) -> Result<(
             .route("/api/v1/changes/{id}/diff", get(get_change_diff))
             .route("/api/v1/changes/{id}/apply", post(apply_change))
             .route("/api/v1/control-plane", get(control_plane));
-        let app = role_profiles::routes(app)
+        let app = lifecycles::routes(role_profiles::routes(app))
             .fallback(get(static_asset))
             .with_state(state.clone())
             .layer(middleware::from_fn_with_state(state.clone(), security));

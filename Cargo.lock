@@ -503,6 +503,7 @@ dependencies = [
  "needle-core",
  "needle-platform-codex",
  "needle-runtime",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",

@@ -33,7 +33,7 @@ mod role_profiles;
 pub use changes::{
     ChangeAttemptRecord, LifecycleChangeContext, PatchFileBlob, PreparedChangeRecord,
 };
-pub use lifecycles::LifecycleProjection;
+pub use lifecycles::{LifecycleProjection, LifecycleSummaryRecord, MAX_LIFECYCLE_LIST_LIMIT};
 pub use role_profiles::{
     RoleProfileAuditOperation, RoleProfileAuditRecord, RoleProfileStateRecord,
 };
@@ -988,6 +988,8 @@ pub enum StoreError {
     RoleProfileNotFound(String),
     #[error("lifecycle validation failed: {0}")]
     Lifecycle(#[from] needle_core::LifecycleError),
+    #[error("lifecycle query is invalid: {0}")]
+    LifecycleQuery(String),
     #[error("lifecycle operation conflicts: {0}")]
     LifecycleConflict(String),
     #[error("lifecycle was not found: {0}")]

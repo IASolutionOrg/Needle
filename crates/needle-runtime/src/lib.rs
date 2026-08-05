@@ -27,11 +27,12 @@ pub use snapshot::{
 };
 pub use store::{
     CacheRecord, ChangeAttemptRecord, ConfigExport, LifecycleChangeContext, LifecycleProjection,
-    MainTurnObservationRecord, NeedShadowRecord, NeedShadowWrite, NeedStepEventRecord,
-    NeedStepRequestRecord, NegativeAttemptRecord, OperatorCostKey, OperatorCostObservation,
-    PatchFileBlob, PreparedChangeRecord, ProofAccountingRecord, RoleProfileAuditOperation,
-    RoleProfileAuditRecord, RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord,
-    RuntimeSettings, RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
+    LifecycleSummaryRecord, MAX_LIFECYCLE_LIST_LIMIT, MainTurnObservationRecord, NeedShadowRecord,
+    NeedShadowWrite, NeedStepEventRecord, NeedStepRequestRecord, NegativeAttemptRecord,
+    OperatorCostKey, OperatorCostObservation, PatchFileBlob, PreparedChangeRecord,
+    ProofAccountingRecord, RoleProfileAuditOperation, RoleProfileAuditRecord,
+    RoleProfileStateRecord, RouteCostObservation, RoutePromotionRecord, RuntimeSettings,
+    RuntimeStore, SessionRecord, StoreError, WorkerRunRecord,
 };
 
 use needle_core::{NeedKey, Preset, Route, RouteMatcher};

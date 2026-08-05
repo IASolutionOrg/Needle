@@ -28,4 +28,5 @@ toml.workspace = true
 rust-embed = "8"
 
 [dev-dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 tower = "0.5"

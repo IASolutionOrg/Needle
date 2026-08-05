@@ -332,16 +332,13 @@ fn seed_exploration_certificate(store: &RuntimeStore, name: &str, source: Digest
     artifact_digest
 }
 
-fn lifecycle_fixture(name: &str) -> (PathBuf, RuntimeStore, ChangeId, LifecycleProjection) {
-    let path = temporary_path(name);
-    let store = RuntimeStore::new(&path);
-    store.initialize().unwrap();
+fn seed_lifecycle(store: &RuntimeStore, name: &str) -> (ChangeId, LifecycleProjection) {
     let profiles = LifecycleWorkerProfiles {
-        explore: active_profile(&store, &format!("{name}.explorer"), CodexRole::Explorer),
-        implement: active_profile(&store, &format!("{name}.implementer"), CodexRole::Implementer),
-        test: active_profile(&store, &format!("{name}.test"), CodexRole::TestRunner),
-        review: active_profile(&store, &format!("{name}.review"), CodexRole::Reviewer),
-        verify: active_profile(&store, &format!("{name}.verify"), CodexRole::Verifier),
+        explore: active_profile(store, &format!("{name}.explorer"), CodexRole::Explorer),
+        implement: active_profile(store, &format!("{name}.implementer"), CodexRole::Implementer),
+        test: active_profile(store, &format!("{name}.test"), CodexRole::TestRunner),
+        review: active_profile(store, &format!("{name}.review"), CodexRole::Reviewer),
+        verify: active_profile(store, &format!("{name}.verify"), CodexRole::Verifier),
     };
     let source = Digest::blake3(format!("{name}:source"));
     let plan = TestPlan {
@@ -359,7 +356,7 @@ fn lifecycle_fixture(name: &str) -> (PathBuf, RuntimeStore, ChangeId, LifecycleP
         requires_approval: true,
         execution_evidence_id: None,
     };
-    let certificate_digest = seed_test_plan_certificate(&store, name, source, &plan);
+    let certificate_digest = seed_test_plan_certificate(store, name, source, &plan);
     let request = ChangeRequest {
         task: "Implement the bounded lifecycle fixture.".to_owned(),
         acceptance_criteria: vec!["The lifecycle remains fail closed.".to_owned()],
@@ -398,7 +395,107 @@ fn lifecycle_fixture(name: &str) -> (PathBuf, RuntimeStore, ChangeId, LifecycleP
             },
         )
         .unwrap();
+    (change_id, projection)
+}
+
+fn lifecycle_fixture(name: &str) -> (PathBuf, RuntimeStore, ChangeId, LifecycleProjection) {
+    let path = temporary_path(name);
+    let store = RuntimeStore::new(&path);
+    store.initialize().unwrap();
+    let (change_id, projection) = seed_lifecycle(&store, name);
     (path, store, change_id, projection)
+}
+
+#[test]
+fn lifecycle_summary_query_is_bounded_ordered_read_only_and_replay_validated() {
+    let path = temporary_path("summary-query");
+    let store = RuntimeStore::new(&path);
+    store.initialize().unwrap();
+    assert!(store.list_lifecycle_summaries(10).unwrap().is_empty());
+
+    let seeded = ["summary-z", "summary-a", "summary-m"]
+        .into_iter()
+        .map(|name| seed_lifecycle(&store, name).0)
+        .collect::<Vec<_>>();
+    let mut expected = seeded.iter().map(ToString::to_string).collect::<Vec<_>>();
+    expected.sort();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let before: (u64, u64, String) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM change_lifecycles),
+                (SELECT COUNT(*) FROM change_events),
+                (SELECT group_concat(state_digest, ',')
+                   FROM (SELECT state_digest FROM change_lifecycles ORDER BY change_id))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    drop(connection);
+
+    let summaries = store.list_lifecycle_summaries(2).unwrap();
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(
+        summaries.iter().map(|item| item.change_id.to_string()).collect::<Vec<_>>(),
+        expected[..2]
+    );
+    let all = store.list_lifecycle_summaries(MAX_LIFECYCLE_LIST_LIMIT).unwrap();
+    assert_eq!(all.iter().map(|item| item.change_id.to_string()).collect::<Vec<_>>(), expected);
+    assert!(matches!(store.list_lifecycle_summaries(0), Err(StoreError::LifecycleQuery(_))));
+    assert!(matches!(
+        store.list_lifecycle_summaries(MAX_LIFECYCLE_LIST_LIMIT + 1),
+        Err(StoreError::LifecycleQuery(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let after: (u64, u64, String) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM change_lifecycles),
+                (SELECT COUNT(*) FROM change_events),
+                (SELECT group_concat(state_digest, ',')
+                   FROM (SELECT state_digest FROM change_lifecycles ORDER BY change_id))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+
+    let corrupt_id = &seeded[0];
+    connection.execute("DROP TRIGGER change_events_no_update", []).unwrap();
+    let mut event_json: serde_json::Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT payload_json FROM change_events
+                 WHERE change_id=?1 AND lifecycle_sequence=0",
+                [corrupt_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    event_json["status"] = serde_json::json!("unknown_status");
+    let event_json = serde_json::to_string(&event_json).unwrap();
+    connection
+        .execute(
+            "UPDATE change_events SET payload_json=?2, payload_digest=?3
+             WHERE change_id=?1 AND lifecycle_sequence=0",
+            params![
+                corrupt_id.to_string(),
+                event_json,
+                Digest::blake3(event_json.as_bytes()).to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.list_lifecycle_summaries(MAX_LIFECYCLE_LIST_LIMIT),
+        Err(StoreError::LifecycleCorruption(_))
+    ));
+
+    drop(store);
+    fs::remove_file(path).unwrap();
 }
 
 #[test]
