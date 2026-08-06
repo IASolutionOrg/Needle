@@ -110,6 +110,7 @@ export type ModelPolicyInput =
 
 export interface ControlPlane {
   schema: string
+  activation: ActivationStatus
   runtime: {
     status: string
     transport: string
@@ -183,6 +184,28 @@ export interface ControlPlane {
     }
   }
   cost_observations: unknown[]
+}
+
+export type ActivationScope =
+  | { kind: "global" }
+  | { kind: "repository"; repository_root: string }
+
+export interface ActivationRecord {
+  scope: ActivationScope
+  enabled: boolean
+  role_profile_id: string | null
+  generation: number
+  state_digest: string
+  created_unix_ms: number
+  updated_unix_ms: number
+}
+
+export interface ActivationStatus {
+  enabled: boolean
+  effective_scope: ActivationScope | null
+  role_profile_id: string | null
+  global: ActivationRecord | null
+  repository: ActivationRecord | null
 }
 
 export type PatchOperation = "create" | "update" | "delete"
@@ -872,6 +895,34 @@ export function useControlPlane() {
   return useQuery({
     queryKey: ["control-plane"],
     queryFn: () => getJson<ControlPlane>("/api/v1/control-plane"),
+  })
+}
+
+export function useActivationToggle() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const current = queryClient.getQueryData<ControlPlane>(["control-plane"])
+      const response = await fetch("/api/v1/activation", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-csrf-token": csrfToken(),
+        },
+        body: JSON.stringify({
+          enabled,
+          expected_state_digest: current?.activation.repository?.state_digest ?? null,
+        }),
+      })
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null
+        throw new Error(body?.error ?? `Activation request failed with ${response.status}`)
+      }
+      return response.json() as Promise<ActivationStatus>
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
+    onError: () => queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
   })
 }
 

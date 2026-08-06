@@ -90,7 +90,7 @@ fn migration_and_revision_lifecycle_are_atomic_and_immutable() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, (1..=16).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=17).collect::<Vec<_>>());
     for name in
         ["role_profiles", "role_profile_revisions", "role_profile_state", "role_profile_audit"]
     {
@@ -595,7 +595,7 @@ fn current_schema_upgrades_a_valid_v14_database_without_attributing_legacy_rows(
     let version: u32 = connection
         .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     let legacy: (Option<String>, Option<u64>, Option<String>) = connection
         .query_row(
             "SELECT role_profile_id, role_profile_revision,

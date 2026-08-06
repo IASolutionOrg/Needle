@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 blake3.workspace = true
+dialoguer = { version = "0.12", default-features = false }
 futures-util = "0.3"
 fs2 = "0.4"
 getrandom = "0.3"

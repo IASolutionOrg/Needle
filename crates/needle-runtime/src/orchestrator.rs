@@ -104,6 +104,18 @@ pub struct ResolveOutcome {
     pub compiled_need: Option<Need>,
 }
 
+fn direct_explore_normalized_request_digest(request: &ResolveRequest) -> Digest {
+    let need_ir_digest = request
+        .need_ir
+        .as_ref()
+        .map(NeedIr::transport_digest)
+        .unwrap_or_else(|| Digest::blake3(b"needle.need-ir/none"));
+    Digest::blake3(
+        format!("needle.direct-explore-cache/2\n{}\n{need_ir_digest}", request.need.digest())
+            .as_bytes(),
+    )
+}
+
 pub struct RuntimeEngine<W> {
     store: RuntimeStore,
     worker: W,
@@ -132,7 +144,7 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
     }
 
     pub fn resolve(&self, request: &ResolveRequest) -> Result<ResolveOutcome, RuntimeError> {
-        self.resolve_with_worker_policy(request, true, false, false)
+        self.resolve_with_worker_policy(request, true, false, false, false)
     }
 
     /// Resolves from already validated state without acquiring a worker lease
@@ -141,7 +153,7 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         &self,
         request: &ResolveRequest,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        self.resolve_with_worker_policy(request, false, false, false)
+        self.resolve_with_worker_policy(request, false, false, false, false)
     }
 
     /// Resolves a request that must use the transport-independent semantic
@@ -150,14 +162,14 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         &self,
         request: &ResolveRequest,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        self.resolve_with_worker_policy(request, true, true, false)
+        self.resolve_with_worker_policy(request, true, true, false, false)
     }
 
     pub fn resolve_semantic_required_cache_only(
         &self,
         request: &ResolveRequest,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        self.resolve_with_worker_policy(request, false, true, false)
+        self.resolve_with_worker_policy(request, false, true, false, false)
     }
 
     /// Runs the normal semantic validity checks but permits a proof-valid,
@@ -167,7 +179,24 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         &self,
         request: &ResolveRequest,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        self.resolve_with_worker_policy(request, true, true, true)
+        self.resolve_with_worker_policy(request, true, true, true, false)
+    }
+
+    /// Resolves an interactive direct-explore request while permitting reuse
+    /// only for an exact, source-bound worker identity. This does not promote
+    /// the route or enable semantic/general cache selection.
+    pub fn resolve_direct_explore(
+        &self,
+        request: &ResolveRequest,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.resolve_with_worker_policy(request, true, false, false, true)
+    }
+
+    pub fn resolve_direct_explore_cache_only(
+        &self,
+        request: &ResolveRequest,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.resolve_with_worker_policy(request, false, false, false, true)
     }
 
     fn resolve_with_worker_policy(
@@ -176,6 +205,7 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         worker_execution_allowed: bool,
         semantic_required: bool,
         calibration_reuse: bool,
+        exact_unpromoted_reuse: bool,
     ) -> Result<ResolveOutcome, RuntimeError> {
         let session =
             self.store.session(&request.session_id)?.ok_or(RuntimeError::MissingSession)?;
@@ -273,6 +303,21 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
         let trusted_test_execution = settings.trusted_test_execution;
         let artifact_request =
             evidence_brief_request(&request.need, snapshot.repository_id, snapshot.source_digest);
+        let output_schema_digest = if exact_unpromoted_reuse {
+            let transport_definition_digest = session
+                .transport_definition_digest
+                .unwrap_or_else(needle_core::need_grammar_definition_digest);
+            Digest::blake3(
+                format!("{ARTIFACT_RESULT_SCHEMA_ID}\n{transport_definition_digest}").as_bytes(),
+            )
+        } else {
+            Digest::blake3(ARTIFACT_RESULT_SCHEMA_ID)
+        };
+        let normalized_request_digest = if exact_unpromoted_reuse {
+            direct_explore_normalized_request_digest(request)
+        } else {
+            request.need.digest()
+        };
         let identity = NeedCacheIdentity {
             repository_id: snapshot.repository_id,
             source_snapshot_digest: snapshot.source_digest,
@@ -280,9 +325,9 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
             route_definition_digest: route.definition_digest,
             preset_definition_digest: preset.definition_digest,
             need_key: request.need.key.clone(),
-            normalized_request_digest: request.need.digest(),
+            normalized_request_digest,
             worker_configuration_digest: worker_config.digest(),
-            output_schema_digest: Digest::blake3(ARTIFACT_RESULT_SCHEMA_ID),
+            output_schema_digest,
             role_profile_provenance: worker_config.role_profile_provenance.clone(),
         };
         let mut worker_request = WorkerRequest {
@@ -295,12 +340,15 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
             declared_test_plan: request.declared_test_plan.clone(),
             trusted_test_execution,
             requested_artifact_kinds: Vec::new(),
+            preferred_artifact_kinds: Vec::new(),
             semantic_fragment,
         };
         let mut semantic_partial = None;
         if let Some(need) = semantic_need.as_ref() {
             worker_request.requested_artifact_kinds =
                 artifact_kinds_for_obligations(&need.required);
+            worker_request.preferred_artifact_kinds =
+                artifact_kinds_for_obligations(&need.preferred);
             let expected_fresh_microusd = self
                 .store
                 .observed_route_cost_by_source(route.matcher.need_key.as_str(), "fresh")?;
@@ -410,6 +458,7 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
                     );
                     worker_request.requested_artifact_kinds =
                         artifact_kinds_for_obligations(&fragment.obligations);
+                    worker_request.preferred_artifact_kinds.clear();
                     worker_request.need_body = semantic_partial_worker_body(
                         &decision.artifacts,
                         decision.claim_material.as_ref(),
@@ -423,6 +472,42 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
             semantic_partial.as_ref().map(|decision| decision.artifacts.as_slice()).unwrap_or(&[]);
         let semantic_claim_material =
             semantic_partial.as_ref().and_then(|decision| decision.claim_material.as_ref());
+        if exact_unpromoted_reuse
+            && !self.store.utility_gate_passed()?
+            && let CacheLookup::Hit(entry) = self.store.cache_lookup(&identity)?
+        {
+            validate_cached_need_result(&repository_root, &entry.result)?;
+            let materialized = materialize_worker_artifact(
+                ArtifactMaterialization {
+                    store: &self.store,
+                    need: &request.need,
+                    repository_root: &repository_root,
+                    repository_id: snapshot.repository_id,
+                    source_snapshot_digest: snapshot.source_digest,
+                    declared_test_plan: request.declared_test_plan.clone(),
+                    publish: false,
+                    reused: &BTreeMap::new(),
+                    semantic_need: semantic_need.as_ref(),
+                    semantic_fragment: worker_request.semantic_fragment.as_ref(),
+                    semantic_reused: semantic_reused_artifacts,
+                    semantic_claim_material,
+                },
+                &entry.worker_outcome,
+            )?;
+            return with_compiled_need(
+                artifact_outcome(
+                    &request.need,
+                    CacheResolution::ExactHit {
+                        artifact_id: materialized.brief.id,
+                        sufficiency_certificate_id: None,
+                        selected_plan_id: None,
+                        resolution_format_revision: None,
+                    },
+                    materialized.brief,
+                ),
+                &semantic_need,
+            );
+        }
         if !self.store.utility_gate_passed()? {
             if !worker_execution_allowed {
                 return Err(RuntimeError::CacheOnlyMiss);
@@ -453,6 +538,9 @@ impl<W: WorkerExecutor> RuntimeEngine<W> {
                 },
                 &entry.worker_outcome,
             )?;
+            if exact_unpromoted_reuse {
+                self.store.publish(&entry)?;
+            }
             let brief: EvidenceBrief = serde_json::from_value(materialized.brief.payload.clone())
                 .map_err(StoreError::from)?;
             return Ok(ResolveOutcome {
@@ -849,15 +937,33 @@ fn materialize_worker_artifact(
                 continue;
             }
             let kind = worker_artifact.kind();
+            let preferred_fragment = predicate_for_artifact_kind(&kind).and_then(|predicate| {
+                (!fragment.obligations.iter().any(|obligation| obligation.predicate == predicate))
+                    .then(|| {
+                        need.preferred
+                            .iter()
+                            .find(|obligation| obligation.predicate == predicate)
+                            .cloned()
+                            .map(|obligation| {
+                                need_fragment(
+                                    need,
+                                    vec![obligation],
+                                    fragment.semantic_inputs.clone(),
+                                )
+                            })
+                    })
+                    .flatten()
+            });
+            let validation_fragment = preferred_fragment.as_ref().unwrap_or(fragment);
             let request = semantic_artifact_request(
                 context.need,
-                fragment,
+                validation_fragment,
                 context.repository_id,
                 context.source_snapshot_digest,
                 &kind,
             );
             match validate_semantic_artifact_with_trace(
-                fragment,
+                validation_fragment,
                 worker_artifact,
                 context.repository_root,
                 request.semantic_id().digest(),
@@ -2097,6 +2203,15 @@ fn artifact_kind_for_predicate(predicate: PredicateKind) -> ArtifactKind {
     }
 }
 
+fn predicate_for_artifact_kind(kind: &ArtifactKind) -> Option<PredicateKind> {
+    match kind.0.as_str() {
+        "code-location" => Some(PredicateKind::ImplementationLocation),
+        "behavior-trace" => Some(PredicateKind::RuntimeFlow),
+        "test-plan" => Some(PredicateKind::FocusedTests),
+        _ => None,
+    }
+}
+
 fn artifact_kinds_for_obligations(obligations: &[needle_core::Obligation]) -> Vec<ArtifactKind> {
     let mut kinds = obligations
         .iter()
@@ -2262,10 +2377,11 @@ mod tests {
     use needle_core::{
         Claim, ClaimKind, ClaimPayload, CodexHost, CodexRole, CommandExecutionEvidence,
         CommandPolicy, EvidenceFailurePolicy, EvidenceReference, FallbackPolicy, FilesystemPolicy,
-        FlowStepRole, LocationRole, ModelPolicy, NeedResult, NetworkPolicy, RepairPolicy,
-        RoleProfileBudget, RoleProfileDefinition, RoleProfileDefinitionInput, RoleProfileId,
-        SemanticArtifactResult, SemanticFlowStep, SemanticLocation, ServiceTier, TestPolicy,
-        ToolPolicy, Uncertainty, WorkerFailure, WorkerOutcome, WorkerProfile,
+        FlowStepRole, LocationRole, ModelPolicy, NEED_IR_FORMAT_REVISION, NeedResult,
+        NetworkPolicy, RepairPolicy, RoleProfileBudget, RoleProfileDefinition,
+        RoleProfileDefinitionInput, RoleProfileId, SemanticArtifactResult, SemanticFlowStep,
+        SemanticLocation, ServiceTier, SubjectExpression, SubjectKind, TestPolicy, ToolPolicy,
+        Uncertainty, WorkerFailure, WorkerOutcome, WorkerProfile,
     };
     use std::fs;
     use std::process::Command;
@@ -2639,6 +2755,25 @@ mod tests {
         }
     }
 
+    struct PreferredOmittingWorker {
+        spawns: Arc<AtomicUsize>,
+    }
+
+    impl WorkerExecutor for PreferredOmittingWorker {
+        fn execute(
+            &self,
+            config: &WorkerConfig,
+            request: &WorkerRequest,
+        ) -> Result<WorkerOutcome, Box<WorkerFailure>> {
+            assert_eq!(request.preferred_artifact_kinds, vec![ArtifactKind::test_plan()]);
+            TypedFakeWorker {
+                spawns: self.spawns.clone(),
+                requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+            .execute(config, request)
+        }
+    }
+
     impl WorkerExecutor for DeclaredPlanWorker {
         fn execute(
             &self,
@@ -2683,6 +2818,10 @@ mod tests {
 
     impl TestContext {
         fn create() -> Self {
+            Self::create_with_utility_gate(true)
+        }
+
+        fn create_with_utility_gate(utility_gate_passed: bool) -> Self {
             let suffix = format!(
                 "{}-{}",
                 std::process::id(),
@@ -2755,7 +2894,9 @@ mod tests {
                     store.role_profile_state(&profile_id).unwrap().state_digest,
                 )
                 .unwrap();
-            store.mark_utility_gate_passed().unwrap();
+            if utility_gate_passed {
+                store.mark_utility_gate_passed().unwrap();
+            }
             Self { root, store, prompt_digest: Digest::blake3("profile"), profile_id }
         }
 
@@ -2785,6 +2926,68 @@ mod tests {
                 declared_test_plan: None,
             }
         }
+
+        fn request_with_subject(&self, session: &str, subject: &str) -> ResolveRequest {
+            let mut request = self.request(session);
+            request.need_ir = Some(NeedIr {
+                route_hint: Some(request.need.key.clone()),
+                subjects: vec![SubjectExpression {
+                    kind: SubjectKind::Symbol,
+                    canonical_name: subject.to_owned(),
+                }],
+                required: Vec::new(),
+                preferred: Vec::new(),
+                semantic_constraints: Vec::new(),
+                world: Vec::new(),
+                input_artifacts: Vec::new(),
+                projection: Vec::new(),
+                body: request.need.body.clone(),
+                format_revision: NEED_IR_FORMAT_REVISION,
+            });
+            request
+        }
+    }
+
+    #[test]
+    fn direct_explore_reuses_only_an_exact_unpromoted_worker_identity() {
+        let context = TestContext::create_with_utility_gate(false);
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let engine = RuntimeEngine::new(
+            context.store.clone(),
+            TypedFakeWorker {
+                spawns: spawns.clone(),
+                requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            },
+        );
+
+        let generated = engine
+            .resolve_direct_explore(&context.request_with_subject("direct-first", "answer"))
+            .unwrap();
+        let reused = engine
+            .resolve_direct_explore(&context.request_with_subject("direct-second", "answer"))
+            .unwrap();
+
+        assert_eq!(generated.status, "generated-unpromoted");
+        assert!(generated.worker_spawned);
+        assert!(reused.cache_hit);
+        assert!(!reused.worker_spawned);
+        assert!(matches!(reused.cache_resolution, CacheResolution::ExactHit { .. }));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(context.root.parent().unwrap());
+    }
+
+    #[test]
+    fn direct_explore_does_not_reuse_when_only_the_structured_subject_changes() {
+        let context = TestContext::create_with_utility_gate(false);
+        let first = context.request_with_subject("subject-first", "answer");
+        let changed = context.request_with_subject("subject-second", "flow_answer");
+
+        assert_eq!(first.need.digest(), changed.need.digest());
+        assert_ne!(
+            direct_explore_normalized_request_digest(&first),
+            direct_explore_normalized_request_digest(&changed)
+        );
+        let _ = fs::remove_dir_all(context.root.parent().unwrap());
     }
 
     #[test]
@@ -2862,6 +3065,66 @@ mod tests {
             artifact_kinds_for_obligations(&[required, preferred]),
             vec![ArtifactKind::code_location(), ArtifactKind::test_plan()]
         );
+    }
+
+    #[test]
+    fn semantic_trace_succeeds_when_preferred_test_plan_is_omitted() {
+        let context = TestContext::create();
+        let session = "semantic-preferred-omitted";
+        context
+            .store
+            .record_session_start_profiled(
+                session,
+                context.prompt_digest,
+                Some("main"),
+                context.root.to_str(),
+                &context.profile_id,
+            )
+            .unwrap();
+        context
+            .store
+            .record_user_prompt(session, Some("turn"), "Trace the answer.", context.root.to_str())
+            .unwrap();
+        let need_ir = NeedIr::parse(
+            "@@need\n\
+             @route trace.state-flow\n\
+             @subject behavior:\"answer\"\n\
+             @require implementation-location selection=primary polarity=positive\n\
+             @require runtime-flow scenario=default granularity=stepwise completeness=contract-complete\n\
+             @prefer focused-tests selection=representative\n\
+             @world source=current features=default\n\
+             \n\
+             Trace the answer.\n\
+             @@end",
+        )
+        .unwrap()
+        .unwrap();
+        let request = ResolveRequest {
+            session_id: session.to_owned(),
+            turn_id: "turn".to_owned(),
+            platform: "codex".to_owned(),
+            main_model: "main".to_owned(),
+            cwd: context.root.clone(),
+            need: SemanticInterrupt::Typed {
+                need_ir: need_ir.clone(),
+                coordination: needle_core::NeedCoordination::WaitResponse,
+            }
+            .compatibility_request(),
+            need_ir: Some(need_ir),
+            declared_test_plan: None,
+        };
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let engine = RuntimeEngine::new(
+            context.store.clone(),
+            PreferredOmittingWorker { spawns: spawns.clone() },
+        );
+
+        let outcome = engine.resolve(&request).unwrap();
+
+        assert!(outcome.worker_spawned);
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert!(!outcome.semantic_artifact_ids.is_empty());
+        let _ = fs::remove_dir_all(context.root.parent().unwrap());
     }
 
     #[test]

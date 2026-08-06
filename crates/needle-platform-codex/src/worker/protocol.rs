@@ -227,6 +227,27 @@ impl NormalizedResponse {
         &self.semantic_artifacts
     }
 
+    pub(super) fn debug_snapshot(&self) -> Value {
+        json!({
+            "accepted_artifacts": self.groups.iter().map(|(key, facts)| json!({
+                "kind": key.kind.as_str(),
+                "path": &key.path,
+                "symbol": &key.symbol,
+                "fact_count": facts.len(),
+            })).collect::<Vec<_>>(),
+            "semantic_artifact_kinds": self.semantic_artifacts
+                .iter()
+                .map(|artifact| artifact.kind().0)
+                .collect::<Vec<_>>(),
+            "test_plan_accepted": self.test_plan.is_some(),
+            "diagnostics": self.diagnostics.iter().map(|diagnostic| json!({
+                "index": diagnostic.index,
+                "code": &diagnostic.code,
+            })).collect::<Vec<_>>(),
+            "discarded_facts": self.discarded_facts,
+        })
+    }
+
     pub(super) fn into_need_result(self, repository_root: &Path) -> Result<NeedResult, String> {
         let mut claims = Vec::new();
         let mut evidence = Vec::new();

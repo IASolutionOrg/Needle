@@ -12,10 +12,11 @@ use needle_core::{
     EvidenceFailurePolicy, ModelPolicy, PatchOperation, WorkerProfile,
     built_in_predicate_contracts, built_in_route_contracts, built_in_route_plans,
 };
+use needle_platform_codex::CodexWorker;
 use needle_runtime::{
-    ChangeApplyError, PreparedChangeRecord, ProofCandidate, ProofPlanner, RuntimeSettings,
-    RuntimeStore, apply_verified_change, artifact_and_certificate_are_fresh, built_in_routes,
-    recover_pending_change_applies,
+    ActivationScope, ChangeApplyError, PreparedChangeRecord, ProofCandidate, ProofPlanner,
+    RuntimeSettings, RuntimeStore, apply_verified_change, artifact_and_certificate_are_fresh,
+    built_in_routes, recover_pending_change_applies,
 };
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,13 @@ struct ApplyChangeBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationBody {
+    enabled: bool,
+    expected_state_digest: Option<Digest>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 enum ModelPolicyBody {
     FixedOrder { profiles: Vec<ModelProfileBody>, repair_once: bool, native_fallback: bool },
@@ -140,7 +148,11 @@ enum IfMatchError {
     Changed,
 }
 
-pub(crate) fn run(data_directory: PathBuf, repository_root: PathBuf) -> Result<(), String> {
+pub(crate) fn run(
+    data_directory: PathBuf,
+    repository_root: PathBuf,
+    open_browser: bool,
+) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async move {
         let repository_root = std::fs::canonicalize(repository_root)
@@ -222,12 +234,17 @@ pub(crate) fn run(data_directory: PathBuf, repository_root: PathBuf) -> Result<(
             .route("/api/v1/changes/{id}", get(get_change))
             .route("/api/v1/changes/{id}/diff", get(get_change_diff))
             .route("/api/v1/changes/{id}/apply", post(apply_change))
+            .route("/api/v1/activation", post(set_activation))
             .route("/api/v1/control-plane", get(control_plane));
         let app = lifecycles::routes(role_profiles::routes(app))
             .fallback(get(static_asset))
             .with_state(state.clone())
             .layer(middleware::from_fn_with_state(state.clone(), security));
-        println!("Needle control plane: http://{authority}/?launch_token={}", state.launch_token);
+        let launch_url = format!("http://{authority}/?launch_token={}", state.launch_token);
+        println!("Needle control plane: {launch_url}");
+        if open_browser && let Err(error) = open_control_plane(&launch_url) {
+            eprintln!("needle: cannot open the default browser ({error}); open the URL above");
+        }
         let http = async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
@@ -246,6 +263,28 @@ pub(crate) fn run(data_directory: PathBuf, repository_root: PathBuf) -> Result<(
         ipc_task.abort();
         result
     })
+}
+
+fn open_control_plane(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn().map(|_| ()).map_err(|error| error.to_string())
 }
 
 async fn index(State(state): State<AppState>, Query(query): Query<LaunchQuery>) -> Response {
@@ -430,8 +469,13 @@ async fn control_plane(State(state): State<AppState>) -> Response {
     let stale_candidates =
         proof_accounting.iter().map(|record| record.stale_candidates).sum::<u64>();
     let active_contradictions = state.store.active_contradiction_count().unwrap_or_default();
+    let activation = match state.store.activation_status(&state.repository_root) {
+        Ok(activation) => activation,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
     Json(serde_json::json!({
         "schema": "needle.control-plane/1",
+        "activation": activation,
         "runtime": {
             "status": "healthy",
             "transport": "codex-app-server",
@@ -514,6 +558,69 @@ async fn control_plane(State(state): State<AppState>) -> Response {
         "cost_observations": []
     }))
     .into_response()
+}
+
+async fn set_activation(
+    State(state): State<AppState>,
+    Json(body): Json<ActivationBody>,
+) -> Response {
+    let profile_id = if body.enabled {
+        let settings = match state.store.settings() {
+            Ok(settings) => settings,
+            Err(error) => return api_error(StatusCode::CONFLICT, &error.to_string()),
+        };
+        let isolation = match CodexWorker::verify_isolation(&settings.codex_executable) {
+            Ok(isolation) => isolation,
+            Err(error) => return api_error(StatusCode::CONFLICT, &error),
+        };
+        if !isolation.verified() {
+            return api_error(
+                StatusCode::CONFLICT,
+                "the configured Codex binary does not satisfy Needle isolation requirements",
+            );
+        }
+        match crate::onboarding::ensure_default_profile(
+            &state.store,
+            &settings,
+            crate::onboarding::DEFAULT_MAX_COST_MICROUSD,
+        ) {
+            Ok(profile_id) => Some(profile_id),
+            Err(error) => return api_error(StatusCode::CONFLICT, &error.to_string()),
+        }
+    } else {
+        None
+    };
+    let scope = match ActivationScope::repository(&state.repository_root) {
+        Ok(scope) => scope,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    if !body.enabled
+        && let Err(error) = crate::codex_skill::remove_managed()
+    {
+        return api_error(StatusCode::CONFLICT, &error);
+    }
+    if let Err(error) = state.store.compare_and_set_activation(
+        scope,
+        body.enabled,
+        profile_id.as_ref(),
+        body.expected_state_digest,
+    ) {
+        let status = if matches!(error, needle_runtime::StoreError::ActivationConflict(_)) {
+            StatusCode::PRECONDITION_FAILED
+        } else {
+            StatusCode::CONFLICT
+        };
+        return api_error(status, &error.to_string());
+    }
+    if body.enabled
+        && let Err(error) = crate::codex_skill::ensure_installed()
+    {
+        return api_error(StatusCode::CONFLICT, &error);
+    }
+    match state.store.activation_status(&state.repository_root) {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 async fn list_needs(State(state): State<AppState>) -> Response {

@@ -153,6 +153,10 @@ pub(crate) fn endpoint(data_directory: &Path) -> String {
     }
 }
 
+pub(crate) fn is_published(data_directory: &Path) -> bool {
+    data_directory.join("runtime.json").is_file()
+}
+
 #[cfg(windows)]
 pub(crate) async fn serve_ipc(
     endpoint: String,
@@ -470,6 +474,20 @@ mod tests {
         assert!(InstanceGuard::acquire(&root).is_err());
         drop(first);
         assert!(InstanceGuard::acquire(&root).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unpublished_runtime_is_a_normal_on_demand_state() {
+        let root = std::env::temp_dir().join(format!(
+            "needle-instance-unpublished-{}-{}",
+            std::process::id(),
+            crate::server::test_nonce()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(!is_published(&root));
+        fs::write(root.join("runtime.json"), "{}").unwrap();
+        assert!(is_published(&root));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -10,7 +10,9 @@ import {
 import type { ReactNode } from "react"
 import { Link } from "react-router"
 
-import { useControlPlane } from "@/api"
+import { useActivationToggle, useControlPlane } from "@/api"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import {
   Table,
@@ -55,6 +57,7 @@ function Panel({
 
 export default function OverviewPage() {
   const control = useControlPlane()
+  const activation = useActivationToggle()
   const routes = control.data?.routes ?? []
   const semantic = control.data?.semantic
   const proofPlans = semantic?.selected_plans ?? []
@@ -64,6 +67,42 @@ export default function OverviewPage() {
     <div className="grid min-h-[calc(100svh-3.75rem)] grid-cols-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 p-4 md:p-6">
         <h1 className="mb-5 text-2xl font-semibold tracking-tight">Overview</h1>
+
+        <section
+          aria-labelledby="needle-activation-title"
+          className="mb-5 flex flex-col gap-4 border bg-panel p-4 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 id="needle-activation-title" className="text-sm font-semibold">
+                Codex companion
+              </h2>
+              <Badge variant={control.data?.activation.enabled ? "default" : "outline"}>
+                {control.data?.activation.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              When enabled, Codex can request repository context from Needle automatically.
+            </p>
+            {activation.error ? (
+              <p role="alert" className="mt-2 text-sm text-destructive">
+                {activation.error.message}
+              </p>
+            ) : null}
+          </div>
+          <Button
+            type="button"
+            variant={control.data?.activation.enabled ? "outline" : "default"}
+            disabled={!control.data || activation.isPending}
+            onClick={() => activation.mutate(!control.data?.activation.enabled)}
+          >
+            {activation.isPending
+              ? "Updating..."
+              : control.data?.activation.enabled
+                ? "Disable Needle"
+                : "Enable Needle"}
+          </Button>
+        </section>
 
         <section className="mb-5 grid border bg-panel sm:grid-cols-2 xl:grid-cols-4">
           {[

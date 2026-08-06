@@ -167,6 +167,8 @@ pub struct WorkerRequest {
     #[serde(default)]
     pub requested_artifact_kinds: Vec<ArtifactKind>,
     #[serde(default)]
+    pub preferred_artifact_kinds: Vec<ArtifactKind>,
+    #[serde(default)]
     pub semantic_fragment: Option<NeedFragment>,
 }
 

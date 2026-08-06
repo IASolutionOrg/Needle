@@ -30,6 +30,7 @@ one.
 | Claim-level reuse | Validator-extracted claims, claim proofs, mixed planning, and bounded authoritative location, runtime-flow, and focused-test claims | Deterministic freshness, mutation, negative, projection, economics, and performance cases | **Implemented; offline validated** |
 | Verified changes | Isolated patch preparation, independent verifier, one repair, explicit journaled apply | Simulator and focused persistence, isolation, drift, and recovery tests | **Implemented; offline validated** |
 | Codex role-profile control plane | Canonical Codex role definitions, bounded policies, immutable revisions, state-digest CAS, SQLite persistence, audit records, explicit WorkerProfile projection, bounded digest-bound HTTP API, local editor, and frozen session/worker/cache provenance | Focused deterministic Rust and frontend tests; lifecycle execution uses only injected adapters, not concrete Codex processes | **Implemented; offline validated** |
+| Installable opt-in Codex companion | Windows-first portable package with the complete pinned Codex runtime resources, CLI and local UI activation, repository-over-global precedence, Codex CLI hook integration, symmetric managed Codex Desktop skill installation/removal, typed direct bounded exploration with required/preferred artifact separation, explicit user-MCP isolation, opt-in bounded worker debug logs, invisible disabled hooks, on-demand progress, targeted generated-file-aware repository search, deterministic canonical skill requests, and source-and-NeedIR-bound exact direct reuse | Deterministic persistence, typed exploration, optional-artifact protocol, runtime-package and MCP-isolation configuration, safe managed-skill removal and preservation cases, debug-log lifecycle, progress, canonical-request and false-hit cache cases, CLI, hook-process, API, and frontend tests without provider calls | **Implemented; offline validated; pre-alpha** |
 | Codex development lifecycle contract | Durable depth-one `explore -> implement -> test -> review -> verify -> apply` state machine, frozen role-profile/test-plan anchors, budgets, cancellation, one repair, explicit approval, transactional SQLite projection/events, restart replay, journaled apply integration, a parent-owned injected-adapter execution kernel, and a bounded authenticated read-only lifecycle HTTP API; concrete Codex adapters and lifecycle UI are not wired | Deterministic transition matrix, adversarial domain/store and HTTP tests, fake-adapter execution, repair, cancellation, stale-CAS, restart, redaction, and zero-write tests without provider calls | **Implemented; offline validated** |
 | Other-host subagent configuration | Configuration-only interoperability is planned for Claude Code and Cursor, followed by OpenCode and Antigravity | Not available | **Pending** |
 | Multi-host orchestration | Execution remains Codex-only; non-Codex execution follows configuration interoperability, a host contract, and conformance evidence | Not available | **Pending** |
@@ -59,6 +60,7 @@ provider-backed claim-authority observation exists.
 | SQLite persistence and additive migrations | **Implemented; offline validated** |
 | Structured stdio MCP | **Implemented; offline validated; bounded live calibration** |
 | Embedded React control plane | **Implemented; frontend and local end-to-end validation** |
+| CLI/UI companion activation with Codex CLI hooks and Desktop skill | **Implemented; offline validated; Windows-first pre-alpha packaging** |
 | Needs, proofs, claims, changes, runs, models, cache, settings, approvals | **Implemented; development interface** |
 | Canonical named Codex role-profile domain and revision store | **Implemented; offline validated** |
 | Named role-profile HTTP/editor | **Implemented; offline validated; configuration mutations only** |
@@ -120,7 +122,8 @@ validation.
 
 ## Current limitations
 
-- The repository is not ready for installation or production use.
+- A Windows-first portable installer and opt-in onboarding path exist, but they
+  remain pre-alpha and are not a supported production installation.
 - Public APIs, configuration, storage, and tool schemas are unstable.
 - Claim authority is deliberately narrow, defaults to `Shadow`, and has no
   provider-backed evidence.
@@ -128,9 +131,9 @@ validation.
 - Canonical role-profile definitions, revision persistence, bounded HTTP/editor
   flows, request-time preflight, frozen session/worker/cache/attempt/audit
   provenance, and the parent-owned lifecycle domain/journal and injected-adapter
-  kernel are implemented and offline validated. No concrete adapter launches or
-  supervises Codex workers, and there is no read/timeline UI; automatic profile
-  activation remains unsupported and activation is an explicit configuration change.
+  kernel are implemented and offline validated. Companion onboarding creates
+  and activates one bounded read-only Explorer profile, while the broader
+  lifecycle still has no concrete adapter or read/timeline UI.
 - The verifier handles a deterministic serial set of up to four distinct
   associated certified test plans; exact duplicates collapse to one execution,
   while over-cap and unavailable plans fail closed. This behavior is offline

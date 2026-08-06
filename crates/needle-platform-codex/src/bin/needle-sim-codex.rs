@@ -75,6 +75,11 @@ fn is_ripgrep_main_scenario(scenario: &str) -> bool {
     )
 }
 
+fn thread_uses_workspace_write(message: &Value) -> bool {
+    message.pointer("/params/sandbox").and_then(Value::as_str) == Some("workspace-write")
+        || message.pointer("/params/permissions").and_then(Value::as_str) == Some(":workspace")
+}
+
 fn requested_main_scenario() -> Option<String> {
     let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from)?;
     fs::read_to_string(codex_home.join(".needle-simulation-main-scenario"))
@@ -100,7 +105,12 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    match arguments.first().map(String::as_str) {
+    let mut command_index = 0;
+    while arguments.get(command_index).map(String::as_str) == Some("--config") {
+        command_index += 2;
+    }
+    let command_arguments = &arguments[command_index..];
+    match command_arguments.first().map(String::as_str) {
         Some("--version") => {
             println!("codex-cli 0.144.0");
             Ok(())
@@ -116,6 +126,13 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some("app-server") => serve_app_server(),
+        Some("mcp")
+            if command_arguments.get(1).map(String::as_str) == Some("list")
+                && command_arguments.iter().any(|argument| argument == "--json") =>
+        {
+            println!("[]");
+            Ok(())
+        }
         Some("exec") => serve_exec_simulator(&arguments[1..]),
         Some("delete") => Ok(()),
         _ => Err("unsupported simulator invocation".to_owned()),
@@ -323,9 +340,7 @@ impl Simulator {
                                 .pointer("/params/developerInstructions")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
-                            if message.pointer("/params/sandbox").and_then(Value::as_str)
-                                == Some("workspace-write")
-                            {
+                            if thread_uses_workspace_write(&message) {
                                 if instructions.contains("one-shot repair") {
                                     "patch_repair".to_owned()
                                 } else {
@@ -379,8 +394,7 @@ impl Simulator {
                             "The declared TestPlan permits but does not require execution",
                         )
                     });
-                self.workspace_write = message.pointer("/params/sandbox").and_then(Value::as_str)
-                    == Some("workspace-write");
+                self.workspace_write = thread_uses_workspace_write(&message);
                 let developer_instructions = message
                     .pointer("/params/developerInstructions")
                     .and_then(Value::as_str)

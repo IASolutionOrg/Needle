@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+#[path = "store/activation.rs"]
+mod activation;
 #[path = "store/changes.rs"]
 mod changes;
 #[path = "store/claims.rs"]
@@ -30,6 +32,7 @@ mod lifecycles;
 #[path = "store/role_profiles.rs"]
 mod role_profiles;
 
+pub use activation::{ActivationRecord, ActivationScope, ActivationStatus};
 pub use changes::{
     ChangeAttemptRecord, LifecycleChangeContext, PatchFileBlob, PreparedChangeRecord,
 };
@@ -942,6 +945,80 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_V17: &str = r#"
+CREATE TABLE product_activation (
+    scope_key TEXT NOT NULL PRIMARY KEY,
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('global', 'repository')),
+    repository_root TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    role_profile_id TEXT REFERENCES role_profiles(profile_id),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    state_digest TEXT NOT NULL CHECK(length(state_digest) = 67),
+    created_unix_ms INTEGER NOT NULL CHECK(created_unix_ms >= 0),
+    updated_unix_ms INTEGER NOT NULL CHECK(updated_unix_ms >= created_unix_ms),
+    CHECK(
+        (scope_kind = 'global' AND scope_key = 'global' AND repository_root = '')
+        OR
+        (scope_kind = 'repository' AND scope_key = repository_root AND repository_root <> '')
+    ),
+    CHECK(enabled = 0 OR role_profile_id IS NOT NULL)
+);
+CREATE UNIQUE INDEX product_activation_global
+    ON product_activation(scope_kind)
+    WHERE scope_kind = 'global';
+CREATE UNIQUE INDEX product_activation_repository
+    ON product_activation(repository_root)
+    WHERE scope_kind = 'repository';
+CREATE TABLE product_activation_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('global', 'repository')),
+    repository_root TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('enable', 'disable')),
+    previous_state_digest TEXT,
+    resulting_state_digest TEXT NOT NULL CHECK(length(resulting_state_digest) = 67),
+    role_profile_id TEXT REFERENCES role_profiles(profile_id),
+    changed_unix_ms INTEGER NOT NULL CHECK(changed_unix_ms >= 0)
+);
+CREATE INDEX product_activation_audit_scope
+    ON product_activation_audit(scope_key, audit_id DESC);
+CREATE TRIGGER product_activation_transition_shape
+BEFORE UPDATE ON product_activation
+WHEN NEW.scope_key <> OLD.scope_key
+  OR NEW.scope_kind <> OLD.scope_kind
+  OR NEW.repository_root <> OLD.repository_root
+  OR NEW.created_unix_ms <> OLD.created_unix_ms
+  OR NEW.generation <> OLD.generation + 1
+  OR NEW.updated_unix_ms < OLD.updated_unix_ms
+BEGIN
+    SELECT RAISE(ABORT, 'invalid product activation transition');
+END;
+CREATE TRIGGER product_activation_no_delete
+BEFORE DELETE ON product_activation
+BEGIN
+    SELECT RAISE(ABORT, 'product activation records are durable');
+END;
+CREATE TRIGGER product_activation_profile_deactivation_guard
+BEFORE UPDATE OF active_revision ON role_profile_state
+WHEN NEW.active_revision IS NULL AND EXISTS(
+    SELECT 1 FROM product_activation
+    WHERE enabled = 1 AND role_profile_id = OLD.profile_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'an enabled product activation uses this role profile');
+END;
+CREATE TRIGGER product_activation_audit_append_only
+BEFORE UPDATE ON product_activation_audit
+BEGIN
+    SELECT RAISE(ABORT, 'product activation audit is append-only');
+END;
+CREATE TRIGGER product_activation_audit_no_delete
+BEFORE DELETE ON product_activation_audit
+BEGIN
+    SELECT RAISE(ABORT, 'product activation audit is append-only');
+END;
+"#;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database operation failed: {0}")]
@@ -996,6 +1073,12 @@ pub enum StoreError {
     LifecycleNotFound(String),
     #[error("stored lifecycle is corrupt: {0}")]
     LifecycleCorruption(String),
+    #[error("product activation is invalid: {0}")]
+    ActivationValidation(String),
+    #[error("product activation operation conflicts: {0}")]
+    ActivationConflict(String),
+    #[error("stored product activation is corrupt: {0}")]
+    ActivationCorruption(String),
     #[error("database connection lock was poisoned")]
     ConnectionLock,
 }
@@ -1320,6 +1403,7 @@ impl RuntimeStore {
         apply_migration(&mut connection, 14, MIGRATION_V14)?;
         apply_migration(&mut connection, 15, MIGRATION_V15)?;
         apply_migration(&mut connection, 16, MIGRATION_V16)?;
+        apply_migration(&mut connection, 17, MIGRATION_V17)?;
         connection.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('utility_gate_passed', '0')",
             [],
@@ -5246,7 +5330,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
         let columns = connection
             .prepare("PRAGMA table_info(worker_runs)")
             .unwrap()

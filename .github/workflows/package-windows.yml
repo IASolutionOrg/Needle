@@ -1,0 +1,86 @@
+name: package-windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CODEX_RUNTIME_VERSION: 0.144.0
+  CODEX_RUNTIME_PACKAGE_SHA256: 4046964ac24104bb79217077a86c96b20edae5a5f548a71442a164d3f9598a35
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/needle-app/web/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.90.0
+          components: clippy, rustfmt
+      - name: Validate and build embedded web control plane
+        working-directory: crates/needle-app/web
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run lint
+          npm run build
+      - name: Validate and build Needle
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+          cargo build --locked --release -p needle-app
+      - name: Assemble portable installer archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/needle-windows-x64 | Out-Null
+          New-Item -ItemType Directory -Path dist/needle-windows-x64/runtime | Out-Null
+          Copy-Item target/release/needle.exe dist/needle-windows-x64/needle.exe
+          $codexAsset = "codex-package-x86_64-pc-windows-msvc.tar.gz"
+          $codexUrl = "https://github.com/openai/codex/releases/download/rust-v$env:CODEX_RUNTIME_VERSION/$codexAsset"
+          $codexArchive = Join-Path $env:RUNNER_TEMP $codexAsset
+          Invoke-WebRequest -Uri $codexUrl -OutFile $codexArchive
+          $actualCodexHash = (Get-FileHash $codexArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualCodexHash -ne $env:CODEX_RUNTIME_PACKAGE_SHA256) {
+            throw "Codex runtime checksum mismatch: expected $env:CODEX_RUNTIME_PACKAGE_SHA256, got $actualCodexHash"
+          }
+          tar -xzf $codexArchive -C dist/needle-windows-x64/runtime
+          $requiredRuntimeFiles = @(
+            "bin/codex.exe",
+            "bin/codex-code-mode-host.exe",
+            "codex-path/rg.exe",
+            "codex-resources/codex-command-runner.exe",
+            "codex-resources/codex-windows-sandbox-setup.exe",
+            "codex-package.json"
+          )
+          foreach ($relativePath in $requiredRuntimeFiles) {
+            $runtimePath = Join-Path "dist/needle-windows-x64/runtime" $relativePath
+            if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+              throw "Codex runtime package is incomplete: missing $relativePath"
+            }
+          }
+          Copy-Item packaging/windows/install.ps1 dist/needle-windows-x64/install.ps1
+          Copy-Item packaging/windows/CODEX_RUNTIME.md dist/needle-windows-x64/CODEX_RUNTIME.md
+          Copy-Item LICENSE.md dist/needle-windows-x64/LICENSE.md
+          Copy-Item docs/INSTALLATION.md dist/needle-windows-x64/README.md
+          Compress-Archive -Path dist/needle-windows-x64/* -DestinationPath dist/needle-windows-x64.zip
+          (Get-FileHash dist/needle-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant() |
+            Set-Content -NoNewline dist/needle-windows-x64.zip.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: needle-windows-x64
+          path: |
+            dist/needle-windows-x64.zip
+            dist/needle-windows-x64.zip.sha256
+          if-no-files-found: error

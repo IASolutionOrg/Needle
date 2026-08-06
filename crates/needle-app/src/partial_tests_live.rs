@@ -620,6 +620,7 @@ fn worker_schema_digest(
         declared_test_plan: None,
         trusted_test_execution: false,
         requested_artifact_kinds: vec![ArtifactKind::test_plan()],
+        preferred_artifact_kinds: Vec::new(),
         semantic_fragment: Some(needle_core::need_fragment(
             need,
             need.required

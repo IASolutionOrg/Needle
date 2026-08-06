@@ -63,6 +63,9 @@ impl ProductResolver {
         if self.worker_policy == WorkerPolicy::CacheOnly {
             return self.engine.resolve_cache_only(request).map_err(|error| error.to_string());
         }
+        if !runtime_instance::is_published(&self.data_directory) {
+            return self.engine.resolve(request).map_err(|error| error.to_string());
+        }
         match runtime_instance::resolve_resident(&self.data_directory, request) {
             Ok(outcome) => Ok(outcome),
             Err(runtime_instance::ResidentResolveError::Unavailable(error)) => {
@@ -71,6 +74,19 @@ impl ProductResolver {
             }
             Err(runtime_instance::ResidentResolveError::Remote(error)) => Err(error),
         }
+    }
+
+    pub(crate) fn resolve_direct_explore(
+        &self,
+        request: &ResolveRequest,
+    ) -> Result<ResolveOutcome, String> {
+        if self.worker_policy == WorkerPolicy::CacheOnly {
+            return self
+                .engine
+                .resolve_direct_explore_cache_only(request)
+                .map_err(|error| error.to_string());
+        }
+        self.engine.resolve_direct_explore(request).map_err(|error| error.to_string())
     }
 
     pub(crate) fn resolve_semantic_required(

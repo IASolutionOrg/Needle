@@ -18,7 +18,7 @@ use needle_core::{
 };
 use needle_platform_codex::{
     CodexWorker, CompactInput, HookConfig, SessionEndInput, SessionStartInput, StopInput,
-    UserPromptSubmitInput, handle_post_compact, handle_pre_compact, handle_session_end,
+    StopOutput, UserPromptSubmitInput, handle_post_compact, handle_pre_compact, handle_session_end,
     handle_session_start, handle_stop, handle_stop_with_resolver, handle_user_prompt_submit,
     record_compact_telemetry,
 };
@@ -36,9 +36,14 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod artifact_cache_main_replay;
+mod codex_hooks;
+mod codex_skill;
+mod debug;
+mod explore;
 mod mcp;
 mod mcp_live_pilot;
 mod minimal_live_pilot;
+mod onboarding;
 mod partial_tests_live;
 mod product_resolver;
 mod worker_live_diagnostic;
@@ -76,12 +81,16 @@ fn main() {
 fn run() -> Result<(), AppError> {
     let mut arguments = env::args().skip(1);
     let Some(command) = arguments.next() else {
-        return Err(AppError::Usage(
-            "needle <init|config|route|cache|doctor|serve|hook|mcp|experiment|plugin> ..."
-                .to_owned(),
-        ));
+        print_usage();
+        return Ok(());
     };
     match command.as_str() {
+        "enable" => onboarding::run_enable(arguments.collect()),
+        "disable" => onboarding::run_disable(arguments.collect()),
+        "status" => onboarding::run_status(arguments.collect()),
+        "debug" => debug::run(arguments.collect()),
+        "explore" => explore::run(arguments.collect()),
+        "ui" => onboarding::run_ui(arguments.collect()),
         "init" => run_init(arguments.collect()),
         "config" => run_config(arguments.collect()),
         "route" => run_route(arguments.collect()),
@@ -93,8 +102,22 @@ fn run() -> Result<(), AppError> {
         "mcp" => run_mcp(arguments.collect()),
         "experiment" => run_experiment(arguments.collect()),
         "plugin" => run_plugin(arguments.collect()),
+        "help" | "--help" | "-h" => {
+            print_usage();
+            Ok(())
+        }
+        "--version" | "-V" => {
+            println!("needle {VERSION}");
+            Ok(())
+        }
         _ => Err(AppError::Usage(format!("unknown subcommand `{command}`"))),
     }
+}
+
+fn print_usage() {
+    println!(
+        "Needle {VERSION}\n\nUsage: needle <command> [options]\n\nCompanion commands:\n  enable   Enable Needle for this repository\n  disable  Disable Needle without deleting data\n  status   Show effective activation and compatibility\n  debug    Manage bounded local worker diagnostics\n  explore  Request bounded repository context\n  ui       Open the local control plane\n\nRun `needle <command> --help` for command options."
+    );
 }
 
 fn run_server(arguments: Vec<String>) -> Result<(), AppError> {
@@ -102,7 +125,7 @@ fn run_server(arguments: Vec<String>) -> Result<(), AppError> {
     let data_directory = product_data_directory(&arguments)?;
     let repository_root =
         option_value(&arguments, "--repository").map(PathBuf::from).unwrap_or(env::current_dir()?);
-    server::run(data_directory, repository_root).map_err(AppError::Runtime)
+    server::run(data_directory, repository_root, false).map_err(AppError::Runtime)
 }
 
 fn validate_server_arguments(arguments: &[String]) -> Result<(), AppError> {
@@ -412,6 +435,69 @@ fn hook_runtime_store() -> Result<RuntimeStore, AppError> {
     Ok(RuntimeStore::new(product_data_directory(&[])?.join("needle.sqlite3")))
 }
 
+#[derive(Clone)]
+struct ActiveHookContext {
+    store: RuntimeStore,
+    role_profile_id: RoleProfileId,
+}
+
+fn active_hook_context(cwd: Option<&str>) -> Option<ActiveHookContext> {
+    let cwd = cwd.map(Path::new)?;
+    let store = match hook_runtime_store() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("needle: activation state is unavailable ({error}); fail-open");
+            return None;
+        }
+    };
+    if !store.path().is_file() {
+        return None;
+    }
+    let (repository_root, _) = match capture_git_snapshot(cwd) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("needle: repository activation cannot be resolved ({error}); fail-open");
+            return None;
+        }
+    };
+    match store.activation_status(&repository_root) {
+        Ok(status) if status.enabled => match status.role_profile_id {
+            Some(role_profile_id) => Some(ActiveHookContext { store, role_profile_id }),
+            None => {
+                eprintln!("needle: enabled activation has no role profile; fail-open");
+                None
+            }
+        },
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("needle: activation state cannot be read ({error}); fail-open");
+            None
+        }
+    }
+}
+
+fn profiled_hook_session(session_id: Option<&str>) -> Option<RuntimeStore> {
+    let session_id = session_id?;
+    let store = match hook_runtime_store() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("needle: session state is unavailable ({error}); fail-open");
+            return None;
+        }
+    };
+    if !store.path().is_file() {
+        return None;
+    }
+    match store.session(session_id) {
+        Ok(Some(session)) if session.role_profile_provenance.is_some() => Some(store),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("needle: session activation cannot be read ({error}); fail-open");
+            None
+        }
+    }
+}
+
 fn product_data_directory(arguments: &[String]) -> Result<PathBuf, AppError> {
     if let Some(value) = option_value(arguments, "--data-dir") {
         return Ok(PathBuf::from(value));
@@ -499,7 +585,10 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
         ));
     };
     let input = read_stdin()?;
-    let config = HookConfig::from_environment();
+    let mut config = HookConfig::from_environment();
+    if config.experiment_arm.is_none() && config.plugin_data.is_none() {
+        config.plugin_data = product_data_directory(&[]).ok().map(|path| path.join("hook-state"));
+    }
     let invalid_input = |error: serde_json::Error| -> Result<(), AppError> {
         eprintln!("needle: invalid hook stdin for {event}: {error}; fail-open");
         println!("{{}}");
@@ -511,14 +600,29 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
                 Ok(parsed) => parsed,
                 Err(error) => return invalid_input(error),
             };
-            let output = handle_session_start(&parsed, &config)?;
-            if let Some(session_id) = parsed.session_id.as_deref() {
-                let store = hook_runtime_store()?;
-                let profile_digest = config.profile()?.definition_digest;
-                let selector = env::var("NEEDLE_ROLE_PROFILE_ID").ok();
-                let result = match selector {
-                    Some(value) => match RoleProfileId::new(value) {
-                        Ok(profile_id) => store.initialize().and_then(|_| {
+            let activation = (config.experiment_arm.is_none())
+                .then(|| active_hook_context(parsed.cwd.as_deref()))
+                .flatten();
+            if config.experiment_arm.is_none() && activation.is_none() {
+                json!({})
+            } else {
+                let output = handle_session_start(&parsed, &config)?;
+                if let Some(session_id) = parsed.session_id.as_deref() {
+                    let store = activation
+                        .as_ref()
+                        .map(|context| context.store.clone())
+                        .unwrap_or(hook_runtime_store()?);
+                    let profile_digest = config.profile()?.definition_digest;
+                    let selector = activation
+                        .as_ref()
+                        .map(|context| context.role_profile_id.clone())
+                        .or_else(|| {
+                            env::var("NEEDLE_ROLE_PROFILE_ID")
+                                .ok()
+                                .and_then(|value| RoleProfileId::new(value).ok())
+                        });
+                    let result = match selector {
+                        Some(profile_id) => store.initialize().and_then(|_| {
                             store.record_session_start_profiled(
                                 session_id,
                                 profile_digest,
@@ -527,47 +631,51 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
                                 &profile_id,
                             )
                         }),
-                        Err(error) => Err(needle_runtime::StoreError::RoleProfileValidation(
-                            error.to_string(),
-                        )),
-                    },
-                    None => {
+                        None => {
+                            eprintln!(
+                                "needle: NEEDLE_ROLE_PROFILE_ID is missing; session provenance is unknown"
+                            );
+                            Ok(())
+                        }
+                    };
+                    if let Err(error) = result {
                         eprintln!(
-                            "needle: NEEDLE_ROLE_PROFILE_ID is missing; session provenance is unknown"
+                            "needle: cannot record profiled product session ({error}); fail-open"
                         );
-                        Ok(())
                     }
-                };
-                if let Err(error) = result {
-                    eprintln!(
-                        "needle: cannot record profiled product session ({error}); fail-open"
-                    );
                 }
+                serde_json::to_value(output)?
             }
-            serde_json::to_value(output)?
         }
         "user-prompt-submit" => {
             let parsed: UserPromptSubmitInput = match serde_json::from_str(&input) {
                 Ok(parsed) => parsed,
                 Err(error) => return invalid_input(error),
             };
-            if let (Some(session_id), Some(prompt)) =
-                (parsed.session_id.as_deref(), parsed.prompt.as_deref())
-            {
-                let store = hook_runtime_store()?;
-                let root_prompt = env::var_os("NEEDLE_PILOT_ROOT_TASK_FILE")
-                    .and_then(|path| fs::read_to_string(path).ok())
-                    .unwrap_or_else(|| prompt.to_owned());
-                if let Err(error) = store.record_user_prompt(
-                    session_id,
-                    parsed.turn_id.as_deref(),
-                    &root_prompt,
-                    parsed.cwd.as_deref(),
-                ) {
-                    eprintln!("needle: cannot record root task ({error}); fail-open");
+            let session_store = (config.experiment_arm.is_none())
+                .then(|| profiled_hook_session(parsed.session_id.as_deref()))
+                .flatten();
+            if config.experiment_arm.is_none() && session_store.is_none() {
+                json!({})
+            } else {
+                if let (Some(session_id), Some(prompt)) =
+                    (parsed.session_id.as_deref(), parsed.prompt.as_deref())
+                {
+                    let store = session_store.unwrap_or(hook_runtime_store()?);
+                    let root_prompt = env::var_os("NEEDLE_PILOT_ROOT_TASK_FILE")
+                        .and_then(|path| fs::read_to_string(path).ok())
+                        .unwrap_or_else(|| prompt.to_owned());
+                    if let Err(error) = store.record_user_prompt(
+                        session_id,
+                        parsed.turn_id.as_deref(),
+                        &root_prompt,
+                        parsed.cwd.as_deref(),
+                    ) {
+                        eprintln!("needle: cannot record root task ({error}); fail-open");
+                    }
                 }
+                serde_json::to_value(handle_user_prompt_submit(&parsed, &config))?
             }
-            serde_json::to_value(handle_user_prompt_submit(&parsed, &config))?
         }
         "stop" => {
             let parsed: StopInput = match serde_json::from_str(&input) {
@@ -576,6 +684,8 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
             };
             let output = if config.experiment_arm.is_some() {
                 handle_stop(&parsed, &config)?
+            } else if profiled_hook_session(parsed.session_id.as_deref()).is_none() {
+                StopOutput::noop()
             } else {
                 handle_stop_with_resolver(&parsed, &config, |need| {
                     let session_id = parsed
@@ -653,31 +763,50 @@ fn run_hook(arguments: Vec<String>) -> Result<(), AppError> {
                 Ok(parsed) => parsed,
                 Err(error) => return invalid_input(error),
             };
-            if let Some(session_id) = parsed.session_id.as_deref() {
-                let store = hook_runtime_store()?;
-                if let Err(error) = store.end_session(session_id) {
-                    eprintln!("needle: cannot clean product session ({error})");
+            let session_store = (config.experiment_arm.is_none())
+                .then(|| profiled_hook_session(parsed.session_id.as_deref()))
+                .flatten();
+            if config.experiment_arm.is_none() && session_store.is_none() {
+                json!({})
+            } else {
+                if let Some(session_id) = parsed.session_id.as_deref() {
+                    let store = session_store.unwrap_or(hook_runtime_store()?);
+                    if let Err(error) = store.end_session(session_id) {
+                        eprintln!("needle: cannot clean product session ({error})");
+                    }
                 }
+                serde_json::to_value(handle_session_end(&parsed, &config))?
             }
-            serde_json::to_value(handle_session_end(&parsed, &config))?
         }
         "pre-compact" => {
             let parsed: CompactInput = match serde_json::from_str(&input) {
                 Ok(parsed) => parsed,
                 Err(error) => return invalid_input(error),
             };
-            let output = handle_pre_compact(&parsed);
-            record_compact_telemetry(&parsed, "PreCompact", &config);
-            serde_json::to_value(output)?
+            if config.experiment_arm.is_none()
+                && profiled_hook_session(parsed.session_id.as_deref()).is_none()
+            {
+                json!({})
+            } else {
+                let output = handle_pre_compact(&parsed);
+                record_compact_telemetry(&parsed, "PreCompact", &config);
+                serde_json::to_value(output)?
+            }
         }
         "post-compact" => {
             let parsed: CompactInput = match serde_json::from_str(&input) {
                 Ok(parsed) => parsed,
                 Err(error) => return invalid_input(error),
             };
-            let output = handle_post_compact(&parsed);
-            record_compact_telemetry(&parsed, "PostCompact", &config);
-            serde_json::to_value(output)?
+            if config.experiment_arm.is_none()
+                && profiled_hook_session(parsed.session_id.as_deref()).is_none()
+            {
+                json!({})
+            } else {
+                let output = handle_post_compact(&parsed);
+                record_compact_telemetry(&parsed, "PostCompact", &config);
+                serde_json::to_value(output)?
+            }
         }
         _ => return Err(AppError::Usage(format!("unknown hook event `{event}`"))),
     };
@@ -3278,11 +3407,58 @@ fn resolve_codex(value: Option<String>) -> Result<PathBuf, AppError> {
             path.display()
         )));
     }
+    if let Some(path) = managed_codex_executable() {
+        return Ok(path);
+    }
     let probe = Command::new("codex").arg("--version").output();
     match probe {
         Ok(output) if output.status.success() => Ok(PathBuf::from("codex")),
-        _ => Err(AppError::Usage("codex not found on PATH; provide --codex".to_owned())),
+        _ => Err(AppError::Runtime(
+            "Needle's managed Codex runtime is missing; reinstall Needle or repair the installation"
+                .to_owned(),
+        )),
     }
+}
+
+fn managed_codex_executable() -> Option<PathBuf> {
+    let current_executable = env::current_exe().ok()?;
+    let candidate = managed_codex_candidate(&current_executable)?;
+    if !managed_codex_package_is_complete(&candidate) {
+        return None;
+    }
+    let output = Command::new(&candidate).arg("--version").output().ok()?;
+    output.status.success().then_some(candidate)
+}
+
+fn managed_codex_candidate(needle_executable: &Path) -> Option<PathBuf> {
+    let file_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    Some(needle_executable.parent()?.join("runtime").join("bin").join(file_name))
+}
+
+fn managed_codex_package_is_complete(codex_executable: &Path) -> bool {
+    if !codex_executable.is_file() {
+        return false;
+    }
+    let Some(runtime_root) = codex_executable.parent().and_then(Path::parent) else {
+        return false;
+    };
+    if !runtime_root.join("codex-package.json").is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        for relative_path in [
+            "bin/codex-code-mode-host.exe",
+            "codex-path/rg.exe",
+            "codex-resources/codex-command-runner.exe",
+            "codex-resources/codex-windows-sandbox-setup.exe",
+        ] {
+            if !runtime_root.join(relative_path).is_file() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn reject_shell_launcher(path: &Path) -> Result<(), AppError> {
@@ -4172,6 +4348,43 @@ mod tests {
         }
         assert!(reject_shell_launcher(Path::new("codex.exe")).is_ok());
         assert!(reject_shell_launcher(Path::new("codex")).is_ok());
+    }
+
+    #[test]
+    fn managed_codex_runtime_is_resolved_relative_to_needle() {
+        let root = Path::new("install");
+        let needle = root.join(if cfg!(windows) { "needle.exe" } else { "needle" });
+        let expected_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+        assert_eq!(
+            managed_codex_candidate(&needle),
+            Some(root.join("runtime").join("bin").join(expected_name))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_codex_runtime_requires_the_complete_windows_package() {
+        let root = env::temp_dir().join(format!("needle-managed-codex-{}", std::process::id()));
+        let runtime = root.join("runtime");
+        let codex = runtime.join("bin/codex.exe");
+        let required = [
+            codex.clone(),
+            runtime.join("bin/codex-code-mode-host.exe"),
+            runtime.join("codex-path/rg.exe"),
+            runtime.join("codex-resources/codex-command-runner.exe"),
+            runtime.join("codex-resources/codex-windows-sandbox-setup.exe"),
+            runtime.join("codex-package.json"),
+        ];
+        let _ = fs::remove_dir_all(&root);
+        for path in &required {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, []).unwrap();
+        }
+        assert!(managed_codex_package_is_complete(&codex));
+
+        fs::remove_file(runtime.join("codex-resources/codex-command-runner.exe")).unwrap();
+        assert!(!managed_codex_package_is_complete(&codex));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

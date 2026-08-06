@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { vi } from "vitest"
 
 import App from "@/App"
@@ -7,6 +7,13 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 
 const controlPlane = {
   schema: "needle.control-plane/1",
+  activation: {
+    enabled: false,
+    effective_scope: null,
+    role_profile_id: null,
+    global: null,
+    repository: null,
+  },
   runtime: {
     status: "healthy",
     transport: "codex-app-server",
@@ -42,11 +49,19 @@ class EventSourceStub {
 }
 
 test("overview distinguishes proof metrics without inventing cost data", async () => {
+  let activationBody: unknown
   vi.stubGlobal("EventSource", EventSourceStub)
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
+      if (url.endsWith("/api/v1/activation")) {
+        activationBody = JSON.parse(String(init?.body))
+        return new Response(JSON.stringify(controlPlane.activation), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
       const body = url.includes("/approvals") ? [] : controlPlane
       return new Response(JSON.stringify(body), {
         status: 200,
@@ -66,6 +81,12 @@ test("overview distinguishes proof metrics without inventing cost data", async (
   )
 
   expect(await screen.findByRole("heading", { name: "Overview" })).toBeVisible()
+  expect(screen.getByRole("button", { name: "Enable Needle" })).toBeEnabled()
+  expect(screen.getByText("Disabled")).toBeVisible()
+  fireEvent.click(screen.getByRole("button", { name: "Enable Needle" }))
+  await waitFor(() =>
+    expect(activationBody).toEqual({ enabled: true, expected_state_digest: null })
+  )
   expect(screen.getAllByText("Recorded plans")).toHaveLength(8)
   expect(screen.getByText("0 candidates")).toBeVisible()
   expect(screen.getByText("0 active")).toBeVisible()

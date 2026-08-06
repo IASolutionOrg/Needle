@@ -2,6 +2,7 @@
 //! while outputs are small, strict protocol objects.
 
 mod app_server;
+mod debug_log;
 mod patcher;
 mod verifier;
 mod worker;
@@ -10,6 +11,9 @@ pub use app_server::{
     ActiveTurnInterruption, CodexMainSession, ContinueWorkingResult, MainContinuationDiagnostics,
     MainDirectFailure, MainFinalTurn, MainNeedDiagnostics, MainNeedRelation, MainNeedTurn,
     MainSessionConfig, MainTurnResult, MainUsage, PILOT_MAIN_REPOSITORY_INSPECTION_INSTRUCTIONS,
+};
+pub use debug_log::{
+    DebugLoggingStatus, debug_logging_status, disable_debug_logging, enable_debug_logging,
 };
 pub use patcher::{CodexPatchWorker, PatchContextItem, PrepareChangeOutcome};
 pub use verifier::{CodexVerifier, VerifyChangeOutcome};

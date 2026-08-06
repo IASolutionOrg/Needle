@@ -52,11 +52,13 @@ flowchart LR
     M --> A["Final answer"]
 ```
 
-The main model can declare a need through the development-only unversioned
-`@@need` lifecycle protocol or call the structured `need_context` MCP tool. Both
-transports compile to the same semantic domain model. Before returning cached
-context, Needle checks exact subject identity, semantic world, dependency
-freshness, contradictions, residual intent, and obligation coverage.
+Codex CLI can declare a need through the development-only unversioned `@@need`
+lifecycle protocol. Codex Desktop delegates through a managed personal skill
+and the direct `needle explore` entry point. Explicit integrations can still
+call the structured `need_context` MCP tool. These transports converge on the
+same resolver domain. Before returning cached context, Needle checks exact
+subject identity, semantic world, dependency freshness, contradictions,
+residual intent, and obligation coverage.
 
 ## Capability snapshot
 
@@ -75,6 +77,15 @@ freshness, contradictions, residual intent, and obligation coverage.
   `verify_change`.
 - A resident runtime, SQLite persistence, IPC, and an embedded React control
   plane.
+- A Windows-first portable installer, opt-in
+  `enable`/`disable`/`status`/`debug`/`explore`/`ui` workflow, persistent
+  repository/global activation, Codex CLI hooks, and a managed Codex Desktop
+  skill.
+- Symmetric Desktop integration lifecycle: enable installs the managed personal
+  skill and disable safely removes only that managed skill.
+- On-demand exploration progress, generated-file-aware repository search,
+  deterministic canonical skill requests, and source-and-NeedIR-bound exact
+  reuse for an identical repeated direct exploration.
 - Isolated change preparation, independent verification, one bounded repair,
   and explicit parent-owned apply.
 
@@ -91,7 +102,8 @@ freshness, contradictions, residual intent, and obligation coverage.
 
 ### Not ready
 
-- Stable installation or configuration compatibility.
+- Stable installation or configuration compatibility beyond the pre-alpha
+  Windows artifact and CLI.
 - A public beta or supported deployment.
 - Cross-platform live validation.
 - A powered multi-task benchmark and statistically supported savings claim.
@@ -163,6 +175,8 @@ database schema, MCP schema, or configuration as a stable interface.
 Continue with [Developer setup](docs/DEVELOPER_SETUP.md) for profile
 initialization and serving, and see
 [Development and troubleshooting](docs/DEVELOPMENT_AND_TROUBLESHOOTING.md).
+
+For the pre-alpha end-user flow, see [Install and use Needle](docs/INSTALLATION.md).
 
 ## Workspace
 

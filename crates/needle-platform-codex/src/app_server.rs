@@ -9,6 +9,7 @@ use needle_runtime::{
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -16,10 +17,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 mod main_session;
+mod repository_tools;
 
 pub use main_session::{
     ActiveTurnInterruption, CodexMainSession, ContinueWorkingResult, MainContinuationDiagnostics,
@@ -30,6 +33,7 @@ pub use main_session::{
 const APPROVAL_TIMEOUT_SECONDS: u64 = 120;
 const MAX_PROTOCOL_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TURN_ERROR_BYTES: usize = 4 * 1024;
+const MAX_APP_SERVER_STDERR_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PendingApprovalMode {
@@ -54,6 +58,7 @@ pub(crate) struct AppServerSession {
     child: Child,
     input: ChildStdin,
     events: Receiver<Result<Value, String>>,
+    stderr_diagnostic: Arc<Mutex<String>>,
     thread_id: String,
     thread_persisted: bool,
     next_request_id: u64,
@@ -267,12 +272,19 @@ impl AppServerSession {
             process_environment
                 .insert("CODEX_HOME".to_owned(), codex_home.to_string_lossy().into_owned());
         }
+        prepend_codex_package_paths(&mut process_environment, &config.executable)?;
+        let configured_mcp_servers = configured_mcp_server_names(config, &process_environment)?;
         let developer_instructions = worker_developer_instructions(
             instructions,
             verifier_test_plans.as_deref().and_then(|plans| plans.first()).or(test_plan.as_ref()),
             &test_execution,
         );
-        let mut command = app_server_command(config, &process_environment, worker_process);
+        let mut command = app_server_command(
+            config,
+            &process_environment,
+            worker_process,
+            &configured_mcp_servers,
+        );
         let mut child =
             command.spawn().map_err(|error| format!("cannot spawn Codex App Server: {error}"))?;
         let input = match child.stdin.take() {
@@ -289,6 +301,37 @@ impl AppServerSession {
                 return Err("App Server stdout unavailable".to_owned());
             }
         };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                reap_failed_start(&mut child);
+                return Err("App Server stderr unavailable".to_owned());
+            }
+        };
+        let stderr_diagnostic = Arc::new(Mutex::new(String::new()));
+        let stderr_capture = Arc::clone(&stderr_diagnostic);
+        let stderr_reader = thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                let Ok(mut diagnostic) = stderr_capture.lock() else {
+                    break;
+                };
+                if diagnostic.len() >= MAX_APP_SERVER_STDERR_BYTES {
+                    break;
+                }
+                if !diagnostic.is_empty() {
+                    diagnostic.push('\n');
+                }
+                let remaining = MAX_APP_SERVER_STDERR_BYTES.saturating_sub(diagnostic.len());
+                let mut end = line.len().min(remaining);
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                diagnostic.push_str(&line[..end]);
+            }
+        });
         let (sender, events) = mpsc::sync_channel(256);
         thread::spawn(move || {
             let reader = BufReader::new(output);
@@ -307,6 +350,7 @@ impl AppServerSession {
                     break;
                 }
             }
+            let _ = stderr_reader.join();
         });
         let approval_context = ApprovalContext {
             route: route.to_owned(),
@@ -341,6 +385,7 @@ impl AppServerSession {
             child,
             input,
             events,
+            stderr_diagnostic,
             thread_id: String::new(),
             thread_persisted: false,
             next_request_id: 1,
@@ -380,41 +425,39 @@ impl AppServerSession {
             )?;
             session.wait_for_response(initialize_id, Duration::from_secs(15))?;
             session.send_notification("initialized", None)?;
-            let thread_id = session.send_request(
-                "thread/start",
-                json!({
-                    "model": config.model,
-                    "serviceTier": config.service_tier,
-                    "cwd": checkout_root,
-                    "approvalPolicy": "on-request",
-                    "approvalsReviewer": "user",
-                    "sandbox": sandbox_mode,
-                    "developerInstructions": developer_instructions,
-                    "ephemeral": true,
-                    "historyMode": "paginated",
-                    "dynamicTools": [],
-                    "environments": [],
-                    "runtimeWorkspaceRoots": [checkout_root],
-                    "config": {
-                        "web_search": "disabled",
-                        "features": {
-                            "hooks": false,
-                            "plugins": false,
-                            "apps": false,
-                            "multi_agent": false
-                        },
-                        "mcp_servers": {},
-                        "project_doc_max_bytes": 0,
-                        "project_doc_fallback_filenames": [],
-                        "model_reasoning_effort": config.reasoning,
-                        "allow_login_shell": false,
-                        "shell_environment_policy": {
-                            "inherit": "none",
-                            "set": shell_environment
-                        }
+            let mut thread_params = json!({
+                "model": config.model,
+                "serviceTier": config.service_tier,
+                "cwd": checkout_root,
+                "approvalPolicy": "on-request",
+                "approvalsReviewer": "user",
+                "developerInstructions": developer_instructions,
+                "ephemeral": true,
+                "historyMode": "paginated",
+                "dynamicTools": repository_tools::specs(),
+                "environments": [],
+                "runtimeWorkspaceRoots": [checkout_root],
+                "config": {
+                    "web_search": "disabled",
+                    "features": {
+                        "hooks": false,
+                        "plugins": false,
+                        "apps": false,
+                        "multi_agent": false
+                    },
+                    "mcp_servers": {},
+                    "project_doc_max_bytes": 0,
+                    "project_doc_fallback_filenames": [],
+                    "model_reasoning_effort": config.reasoning,
+                    "allow_login_shell": false,
+                    "shell_environment_policy": {
+                        "inherit": "none",
+                        "set": shell_environment
                     }
-                }),
-            )?;
+                }
+            });
+            configure_thread_access(&mut thread_params, sandbox_mode)?;
+            let thread_id = session.send_request("thread/start", thread_params)?;
             let response = session.wait_for_response(thread_id, Duration::from_secs(30))?;
             response
                 .pointer("/result/thread/id")
@@ -502,6 +545,17 @@ impl AppServerSession {
             let Some(event) = event else {
                 continue;
             };
+            if event.get("method").and_then(Value::as_str) == Some("item/tool/call") {
+                self.handle_repository_tool_call(&event).map_err(|diagnostic| {
+                    AppServerTurnFailure::observed(
+                        diagnostic,
+                        input_tokens,
+                        cached_input_tokens,
+                        output_tokens,
+                    )
+                })?;
+                continue;
+            }
             if event.get("method").and_then(Value::as_str) == Some("error")
                 && event.pointer("/params/turnId").and_then(Value::as_str) == Some(turn_id.as_str())
             {
@@ -789,6 +843,36 @@ impl AppServerSession {
         Ok(())
     }
 
+    fn handle_repository_tool_call(&mut self, event: &Value) -> Result<(), String> {
+        let params = event
+            .get("params")
+            .ok_or_else(|| "repository tool request has no params".to_owned())?;
+        if params.get("threadId").and_then(Value::as_str) != Some(self.thread_id.as_str()) {
+            return Err("repository tool request targeted another thread".to_owned());
+        }
+        let tool = params
+            .get("tool")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "repository tool request has no tool name".to_owned())?;
+        let arguments = params.get("arguments").unwrap_or(&Value::Null);
+        let result =
+            repository_tools::execute(tool, arguments, &self.approval_context.checkout_root);
+        let (success, text) = match result {
+            Ok(output) => {
+                self.observed_files.extend(output.observed_files);
+                (true, output.text)
+            }
+            Err(diagnostic) => (false, diagnostic),
+        };
+        self.respond(
+            event,
+            json!({
+                "success": success,
+                "contentItems": [{"type": "inputText", "text": text}]
+            }),
+        )
+    }
+
     fn wait_for_web_decision(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, String> {
         loop {
             let now = now_ms();
@@ -952,7 +1036,18 @@ impl AppServerSession {
             Ok(event) => event.map(Some),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
-                Err("Codex App Server event stream closed".to_owned())
+                let diagnostic = self
+                    .stderr_diagnostic
+                    .lock()
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty());
+                match diagnostic {
+                    Some(diagnostic) => {
+                        Err(format!("Codex App Server event stream closed: {diagnostic}"))
+                    }
+                    None => Err("Codex App Server event stream closed".to_owned()),
+                }
             }
         }
     }
@@ -1065,19 +1160,33 @@ fn app_server_command(
     config: &WorkerConfig,
     process_environment: &BTreeMap<String, String>,
     worker_process: bool,
+    configured_mcp_servers: &[String],
 ) -> Command {
     let mut command = Command::new(&config.executable);
     command
         .arg("app-server")
-        .arg("--strict-config")
         .arg("--listen")
         .arg("stdio://")
         .arg("--config")
         .arg("analytics.enabled=false")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env_clear();
+        .arg("--config")
+        .arg("notify=[]")
+        .arg("--config")
+        .arg("features.hooks=false")
+        .arg("--config")
+        .arg("features.plugins=false")
+        .arg("--config")
+        .arg("features.apps=false")
+        .arg("--config")
+        .arg("features.multi_agent=false")
+        .arg("--config")
+        .arg("features.code_mode_host=false")
+        .arg("--config")
+        .arg("mcp_servers={}");
+    for server_name in configured_mcp_servers {
+        command.arg("--config").arg(disable_mcp_server_override(server_name));
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).env_clear();
     for (key, value) in process_environment {
         command.env(key, value);
     }
@@ -1085,6 +1194,134 @@ fn app_server_command(
         command.env("NEEDLE_WORKER", "1");
     }
     command
+}
+
+fn configure_thread_access(params: &mut Value, sandbox_mode: &str) -> Result<(), String> {
+    let object = params
+        .as_object_mut()
+        .ok_or_else(|| "thread/start params must be a JSON object".to_owned())?;
+    #[cfg(windows)]
+    {
+        let permission_profile = match sandbox_mode {
+            "read-only" => ":read-only",
+            "workspace-write" => ":workspace",
+            "danger-full-access" => ":danger-full-access",
+            value => return Err(format!("unsupported Codex sandbox mode: {value}")),
+        };
+        object.insert("permissions".to_owned(), Value::String(permission_profile.to_owned()));
+    }
+    #[cfg(not(windows))]
+    {
+        object.insert("sandbox".to_owned(), Value::String(sandbox_mode.to_owned()));
+    }
+    Ok(())
+}
+
+fn configured_mcp_server_names(
+    config: &WorkerConfig,
+    process_environment: &BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let mut command = Command::new(&config.executable);
+    command
+        .args([
+            "--config",
+            "features.hooks=false",
+            "--config",
+            "features.plugins=false",
+            "--config",
+            "features.apps=false",
+            "--config",
+            "features.multi_agent=false",
+            "mcp",
+            "list",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear();
+    for (key, value) in process_environment {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("cannot inspect configured Codex MCP servers: {error}"))?;
+    if !output.status.success() {
+        let diagnostic = bound_protocol_text(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            MAX_TURN_ERROR_BYTES,
+        );
+        return Err(if diagnostic.is_empty() {
+            format!("Codex MCP inspection failed with {}", output.status)
+        } else {
+            format!("Codex MCP inspection failed with {}: {diagnostic}", output.status)
+        });
+    }
+
+    let entries = serde_json::from_slice::<Value>(&output.stdout)
+        .map_err(|error| format!("Codex MCP inspection returned invalid JSON: {error}"))?;
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| "Codex MCP inspection did not return an array".to_owned())?;
+    if entries.len() > 64 {
+        return Err("Codex MCP inspection exceeded the 64-server safety bound".to_owned());
+    }
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| is_safe_mcp_server_name(name))
+            .ok_or_else(|| "Codex MCP inspection returned an invalid server name".to_owned())?;
+        names.insert(name.to_owned());
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn prepend_codex_package_paths(
+    process_environment: &mut BTreeMap<String, String>,
+    executable: &str,
+) -> Result<(), String> {
+    let executable = Path::new(executable);
+    let Some(bin_directory) = executable.parent().filter(|path| path.is_dir()) else {
+        return Ok(());
+    };
+    let Some(package_root) = bin_directory.parent() else {
+        return Ok(());
+    };
+    if !package_root.join("codex-package.json").is_file() {
+        return Ok(());
+    }
+
+    let mut paths = vec![
+        bin_directory.to_path_buf(),
+        package_root.join("codex-resources"),
+        package_root.join("codex-path"),
+    ];
+    let existing_path = process_environment
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.clone());
+    if let Some(existing_path) = existing_path {
+        paths.extend(env::split_paths(&existing_path));
+    }
+    process_environment.retain(|key, _| !key.eq_ignore_ascii_case("PATH"));
+    let joined = env::join_paths(paths)
+        .map_err(|error| format!("cannot construct the managed Codex package PATH: {error}"))?;
+    process_environment.insert("PATH".to_owned(), joined.to_string_lossy().into_owned());
+    Ok(())
+}
+
+fn is_safe_mcp_server_name(server_name: &str) -> bool {
+    !server_name.is_empty()
+        && server_name.len() <= 256
+        && server_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn disable_mcp_server_override(server_name: &str) -> String {
+    format!("mcp_servers.{server_name}.enabled=false")
 }
 
 fn remaining_turn_time(
@@ -1753,6 +1990,85 @@ pub(crate) fn validate_compatibility_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_server_launch_is_forward_compatible_and_disables_user_extensions() {
+        let config = WorkerConfig {
+            executable: "codex".to_owned(),
+            model: "gpt-test".to_owned(),
+            reasoning: "medium".to_owned(),
+            service_tier: None,
+            timeout_seconds: 60,
+            evidence_failure_policy: needle_core::EvidenceFailurePolicy::DiscardInvalidFact,
+            role_profile_provenance: None,
+        };
+        let command = app_server_command(
+            &config,
+            &BTreeMap::new(),
+            true,
+            &["node_repl".to_owned(), "server-name_2".to_owned()],
+        );
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!arguments.iter().any(|argument| argument == "--strict-config"));
+        for override_value in [
+            "notify=[]",
+            "features.hooks=false",
+            "features.plugins=false",
+            "features.apps=false",
+            "features.multi_agent=false",
+            "features.code_mode_host=false",
+            "mcp_servers={}",
+        ] {
+            assert!(arguments.iter().any(|argument| argument == override_value));
+        }
+        for override_value in
+            ["mcp_servers.node_repl.enabled=false", "mcp_servers.server-name_2.enabled=false"]
+        {
+            assert!(arguments.iter().any(|argument| argument == override_value));
+        }
+    }
+
+    #[test]
+    fn mcp_server_overrides_accept_only_safe_dotted_path_segments() {
+        for name in ["codegraph", "node_repl", "server-name_2"] {
+            assert!(is_safe_mcp_server_name(name));
+        }
+        for name in ["", "server.with.dots", "server name", r#"server"quoted"#] {
+            assert!(!is_safe_mcp_server_name(name));
+        }
+    }
+
+    #[test]
+    fn managed_codex_package_directories_are_prepended_to_process_path() {
+        let root = env::temp_dir().join(format!("needle-codex-path-{}", std::process::id()));
+        let bin = root.join("bin");
+        let resources = root.join("codex-resources");
+        let codex_path = root.join("codex-path");
+        let _ = std::fs::remove_dir_all(&root);
+        for directory in [&bin, &resources, &codex_path] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(root.join("codex-package.json"), b"{}").unwrap();
+        let executable = bin.join(if cfg!(windows) { "codex.exe" } else { "codex" });
+        std::fs::write(&executable, []).unwrap();
+        let existing = env::temp_dir().join("needle-existing-path");
+        let mut environment = BTreeMap::from([(
+            "Path".to_owned(),
+            env::join_paths([&existing]).unwrap().to_string_lossy().into_owned(),
+        )]);
+
+        prepend_codex_package_paths(&mut environment, &executable.to_string_lossy()).unwrap();
+
+        let paths = env::split_paths(environment.get("PATH").unwrap()).collect::<Vec<_>>();
+        assert_eq!(&paths[..3], &[bin, resources, codex_path]);
+        assert_eq!(paths.get(3), Some(&existing));
+        assert_eq!(environment.keys().filter(|key| key.eq_ignore_ascii_case("PATH")).count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn fixture_is_bound_to_supported_version_and_required_approval_methods() {

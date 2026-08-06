@@ -18,6 +18,8 @@ promise.
 
 ## Develop locally
 
+- [Install and use Needle](INSTALLATION.md) - Windows-first portable install,
+  activation, hook trust, normal use, and local UI.
 - [Developer setup](DEVELOPER_SETUP.md)
 - [Configuration](CONFIGURATION.md)
 - [Runtime and web control plane](RUNTIME_AND_WEB_CONTROL_PLANE.md)

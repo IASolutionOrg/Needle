@@ -14,9 +14,11 @@ run. It is a development workflow, not a supported installation path.
 rustup toolchain install 1.90.0 --component rustfmt --component clippy
 ```
 
-Use the native Codex executable. On Windows this means `codex.exe`, not
-`codex.cmd`, `cmd.exe`, PowerShell, or another launcher script. Unsupported
-versions or missing App Server capabilities fail preflight.
+Use the native Codex package. On Windows the managed development layout is the
+official `codex-package-x86_64-pc-windows-msvc` archive with its `bin`,
+`codex-path`, and `codex-resources` directories intact, not a copied standalone
+`codex.exe`, launcher script, or shell. Unsupported versions, incomplete
+packages, or missing App Server capabilities fail preflight.
 
 ## Build
 

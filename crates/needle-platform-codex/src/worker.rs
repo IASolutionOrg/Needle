@@ -1,6 +1,7 @@
 mod protocol;
 
 use crate::app_server::{AppServerSession, validate_compatibility_fixture};
+use crate::debug_log::WorkerDebugLog;
 use needle_core::{
     ArtifactKind, Digest, NeedResult, SemanticArtifactResult, TestPlan, WorkerArtifactResult,
     WorkerConfig, WorkerFailure, WorkerOutcome, WorkerRequest, built_in_route_plans,
@@ -13,7 +14,7 @@ use protocol::{
     should_repair, worker_output_schema,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -65,6 +66,7 @@ pub struct WorkerDiagnosticContract {
     pub schema: String,
     pub output_schema_id: String,
     pub requested_artifact_kinds: Vec<ArtifactKind>,
+    pub preferred_artifact_kinds: Vec<ArtifactKind>,
     pub system_instructions: String,
     pub system_instructions_digest: Digest,
     pub prompt: String,
@@ -246,6 +248,7 @@ impl CodexWorker {
                 needle_core::ARTIFACT_RESULT_SCHEMA_ID.to_owned()
             },
             requested_artifact_kinds,
+            preferred_artifact_kinds: preferred_model_artifact_kinds(request),
             system_instructions_digest: Digest::blake3(system_instructions.as_bytes()),
             prompt_digest: Digest::blake3(prompt.as_bytes()),
             output_schema_digest,
@@ -268,7 +271,22 @@ impl CodexWorker {
         let mut discarded_facts = 0_u32;
         let mut session_id = None;
         let mut cleanup_success = None;
+        let required_model_kinds = required_model_artifact_kinds(request);
+        let preferred_model_kinds = preferred_model_artifact_kinds(request);
         let requested_model_kinds = requested_model_artifact_kinds(request);
+        let debug_log = WorkerDebugLog::start(
+            &self.data_directory,
+            json!({
+                "route": request.need_key.as_str(),
+                "repository_root": &request.repository_root,
+                "worker_model": &config.model,
+                "worker_reasoning": &config.reasoning,
+                "semantic_request": request.semantic_fragment.is_some(),
+                "required_artifact_kinds": required_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>(),
+                "preferred_artifact_kinds": preferred_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>(),
+                "allowed_artifact_kinds": requested_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>(),
+            }),
+        );
 
         let result = (|| -> Result<WorkerProtocolOutput, WorkerProtocolFailure> {
             let isolation = Self::verify_isolation(&config.executable)
@@ -350,19 +368,33 @@ impl CodexWorker {
                         ("worker_turn_failed".to_owned(), failure.diagnostic)
                     })?;
                 usage.absorb_total(&first);
+                debug_log.event(
+                    "worker_response",
+                    json!({
+                        "turn": 1,
+                        "sandbox_root": sandbox.checkout_root(),
+                        "response": &first.response,
+                        "observed_files": &first.observation_trace.observed_files,
+                        "observation_gaps": &first.observation_trace.gaps,
+                    }),
+                );
                 let mut command_evidence = first.command_evidence;
                 let mut observation_trace = first.observation_trace;
                 let first_test_error =
                     test_evidence_error(effective_test_plan.as_ref(), &command_evidence);
                 let actionable_artifact_repair =
-                    artifact_repair_is_actionable(&requested_model_kinds, &first.response);
+                    artifact_repair_is_actionable(&required_model_kinds, &first.response);
                 let mut normalized = deserialize_and_normalize(
                     first.response,
                     sandbox.checkout_root(),
                     &requested_model_kinds,
                 );
                 normalized.discard_unrequested_kinds(&requested_model_kinds);
-                normalized.record_missing_requested_kinds(&requested_model_kinds);
+                normalized.record_missing_requested_kinds(&required_model_kinds);
+                debug_log.event(
+                    "normalization",
+                    json!({"turn": 1, "result": normalized.debug_snapshot()}),
+                );
                 discarded_facts = discarded_facts.saturating_add(normalized.discarded_facts);
 
                 let repair_required = repair_required(
@@ -378,7 +410,7 @@ impl CodexWorker {
                         &normalized.diagnostics,
                         final_test_error.as_deref(),
                         effective_test_plan.as_ref(),
-                        &requested_model_kinds,
+                        &required_model_kinds,
                     );
                     let remaining = remaining_worker_budget(
                         config.timeout_seconds,
@@ -405,6 +437,16 @@ impl CodexWorker {
                             )
                         })?;
                     usage.absorb_total(&second);
+                    debug_log.event(
+                        "worker_response",
+                        json!({
+                            "turn": 2,
+                            "sandbox_root": sandbox.checkout_root(),
+                            "response": &second.response,
+                            "observed_files": &second.observation_trace.observed_files,
+                            "observation_gaps": &second.observation_trace.gaps,
+                        }),
+                    );
                     observation_trace.merge(second.observation_trace);
                     accumulate_command_evidence(&mut command_evidence, second.command_evidence);
                     final_test_error =
@@ -415,14 +457,18 @@ impl CodexWorker {
                         &requested_model_kinds,
                     );
                     repaired.discard_unrequested_kinds(&requested_model_kinds);
-                    repaired.record_missing_requested_kinds(&requested_model_kinds);
+                    repaired.record_missing_requested_kinds(&required_model_kinds);
+                    debug_log.event(
+                        "normalization",
+                        json!({"turn": 2, "result": repaired.debug_snapshot()}),
+                    );
                     discarded_facts = discarded_facts.saturating_add(repaired.discarded_facts);
                     normalized.merge(repaired);
                 }
                 if let Some(error) = final_test_error {
                     return Err(("test_evidence_invalid".to_owned(), error));
                 }
-                let missing_kinds = normalized.missing_requested_kinds(&requested_model_kinds);
+                let missing_kinds = normalized.missing_requested_kinds(&required_model_kinds);
                 if !missing_kinds.is_empty() {
                     return Err((
                         "artifact_protocol_incomplete".to_owned(),
@@ -487,6 +533,31 @@ impl CodexWorker {
         })();
 
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        match &result {
+            Ok(_) => debug_log.event(
+                "complete",
+                json!({
+                    "status": "success",
+                    "duration_ms": duration_ms,
+                    "worker_turns": worker_turns,
+                    "discarded_facts": discarded_facts,
+                    "session_cleanup_success": cleanup_success,
+                }),
+            ),
+            Err((code, diagnostic)) => debug_log.event(
+                "complete",
+                json!({
+                    "status": "failure",
+                    "failure_code": code,
+                    "failure_diagnostic": diagnostic,
+                    "duration_ms": duration_ms,
+                    "worker_turns": worker_turns,
+                    "discarded_facts": discarded_facts,
+                    "session_cleanup_success": cleanup_success,
+                }),
+            ),
+        }
+        let debug_path = debug_log.path().map(|path| path.display().to_string());
         match result {
             Ok((result, artifact_result, semantic_artifact_result, codex_version)) => {
                 Ok(WorkerOutcome {
@@ -512,7 +583,13 @@ impl CodexWorker {
             }
             Err((code, diagnostic)) => Err(Box::new(WorkerFailure {
                 code,
-                diagnostic: bound_text(&diagnostic, MAX_DIAGNOSTIC_BYTES),
+                diagnostic: bound_text(
+                    &match debug_path {
+                        Some(path) => format!("{diagnostic}; debug_log={path}"),
+                        None => diagnostic,
+                    },
+                    MAX_DIAGNOSTIC_BYTES,
+                ),
                 input_tokens: usage.input_tokens,
                 cached_input_tokens: usage.cached_input_tokens,
                 output_tokens: usage.output_tokens,
@@ -709,6 +786,8 @@ fn worker_prompt(request: &WorkerRequest) -> String {
 
 fn worker_system_instructions(request: &WorkerRequest) -> String {
     let preset = bound_text(request.preset.system_prompt.trim(), 420);
+    let required_model_kinds = required_model_artifact_kinds(request);
+    let preferred_model_kinds = preferred_model_artifact_kinds(request);
     let requested_model_kinds = requested_model_artifact_kinds(request);
     let test_policy = if effective_test_plan(request).is_some() {
         "The declared TestPlan permits but does not require execution. Run it only when Needle has not marked test execution unavailable, and then run only that direct cargo test in the isolated checkout; Needle decides its approval. The TestPlan and its test locations are parent-owned; do not return them as code-location. "
@@ -717,15 +796,20 @@ fn worker_system_instructions(request: &WorkerRequest) -> String {
     } else {
         "Do not run tests, builds, or scripts because no TestPlan was declared. "
     };
-    let requested =
-        requested_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>().join(", ");
+    let required =
+        required_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>().join(", ");
+    let preferred = if preferred_model_kinds.is_empty() {
+        "none".to_owned()
+    } else {
+        preferred_model_kinds.iter().map(|kind| kind.0.as_str()).collect::<Vec<_>>().join(", ")
+    };
     let schema_id = if request.semantic_fragment.is_some() {
         needle_core::SEMANTIC_ARTIFACT_RESULT_SCHEMA_ID
     } else {
         needle_core::ARTIFACT_RESULT_SCHEMA_ID
     };
     format!(
-        "{preset}\n\nContract: discover only these requested artifact kinds: {requested}. Use only bounded read-only inspection in the isolated checkout. Searches may locate candidates, but return only the minimal repository-relative evidence files that support the selected result; Needle reads and validates those declarations independently. Read-only source checkout. {test_policy}For semantic locations, identify the exact symbol and always return null byte_start and byte_end; line numbers are not byte offsets. Never modify files. No network, hooks, plugins, MCP, memory, project instructions, or subagents. Return only JSON matching the provided {schema_id} output schema. Return no unrequested artifact kind. Max 8 artifacts. Derive test argv only from an observed Cargo target and test identifier. In a test-plan, argv is the complete process vector and must begin exactly with [\"cargo\",\"test\"]; do not omit cargo even though runner is also \"cargo\"."
+        "{preset}\n\nContract: required artifact kinds: {required}. Preferred artifact kinds: {preferred}. Return every required kind. Preferred kinds are optional: include them only when bounded inspection finds valid evidence, and never sacrifice a required kind to obtain one. Use only needle_search, needle_read, and needle_list; never shell. Search the exact subject once, then narrow later calls to returned paths. Return only the minimal repository-relative evidence files that support the selected result; Needle reads and validates those declarations independently. Read-only source checkout. {test_policy}For semantic locations, identify the exact symbol and always return null byte_start and byte_end; line numbers are not byte offsets. Never modify files. No network, hooks, plugins, MCP, memory, project instructions, or subagents. Return only JSON matching the provided {schema_id} output schema. Return no unrequested artifact kind. Max 8 artifacts. Derive test argv only from an observed Cargo target and test identifier. In a test-plan, argv is the complete process vector and must begin exactly with [\"cargo\",\"test\"]; do not omit cargo even though runner is also \"cargo\"."
     )
 }
 
@@ -740,8 +824,8 @@ fn missing_artifact_diagnostic(
     )
 }
 
-fn requested_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> {
-    let mut requested = if request.requested_artifact_kinds.is_empty() {
+fn required_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> {
+    let mut required = if request.requested_artifact_kinds.is_empty() {
         built_in_route_plans()
             .into_iter()
             .find(|plan| plan.route_key == request.need_key)
@@ -757,15 +841,35 @@ fn requested_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> 
         request.requested_artifact_kinds.clone()
     };
     if request.declared_test_plan.is_some() {
-        requested.retain(|kind| kind != &ArtifactKind::test_plan());
+        required.retain(|kind| kind != &ArtifactKind::test_plan());
     }
     // A validated BehaviorTrace already carries repository-relative paths and
     // symbols for every step. The runtime deterministically projects those
     // locations into the CodeLocation node, so asking the model to repeat the
     // same evidence under a second kind only makes the protocol more brittle.
-    if request.semantic_fragment.is_none() && requested.contains(&ArtifactKind::behavior_trace()) {
-        requested.retain(|kind| kind != &ArtifactKind::code_location());
+    if request.semantic_fragment.is_none() && required.contains(&ArtifactKind::behavior_trace()) {
+        required.retain(|kind| kind != &ArtifactKind::code_location());
     }
+    required.sort();
+    required.dedup();
+    required
+}
+
+fn preferred_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> {
+    let required = required_model_artifact_kinds(request);
+    let mut preferred = request.preferred_artifact_kinds.clone();
+    if request.declared_test_plan.is_some() {
+        preferred.retain(|kind| kind != &ArtifactKind::test_plan());
+    }
+    preferred.retain(|kind| !required.contains(kind));
+    preferred.sort();
+    preferred.dedup();
+    preferred
+}
+
+fn requested_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> {
+    let mut requested = required_model_artifact_kinds(request);
+    requested.extend(preferred_model_artifact_kinds(request));
     requested.sort();
     requested.dedup();
     requested
@@ -773,7 +877,8 @@ fn requested_model_artifact_kinds(request: &WorkerRequest) -> Vec<ArtifactKind> 
 
 fn effective_test_plan(request: &WorkerRequest) -> Option<&TestPlan> {
     let test_requested = request.requested_artifact_kinds.is_empty()
-        || request.requested_artifact_kinds.contains(&needle_core::ArtifactKind::test_plan());
+        || request.requested_artifact_kinds.contains(&needle_core::ArtifactKind::test_plan())
+        || request.preferred_artifact_kinds.contains(&needle_core::ArtifactKind::test_plan());
     test_requested.then_some(request.declared_test_plan.as_ref()).flatten()
 }
 
@@ -1030,6 +1135,7 @@ mod tests {
             declared_test_plan: test_plan,
             trusted_test_execution: true,
             requested_artifact_kinds: Vec::new(),
+            preferred_artifact_kinds: Vec::new(),
             semantic_fragment: None,
         }
     }
@@ -1040,7 +1146,9 @@ mod tests {
         assert_eq!(worker_prompt(&request), "trace the requested state flow");
         let system = worker_system_instructions(&request);
         assert!(system.contains("configured preset text"));
-        assert!(system.contains("bounded read-only inspection"));
+        assert!(system.contains("needle_search, needle_read, and needle_list"));
+        assert!(system.contains("never shell"));
+        assert!(system.contains("narrow later calls to returned paths"));
         assert!(system.contains("Needle reads and validates those declarations independently"));
         assert!(!system.contains("Get-Content"));
         assert!(system.contains("No TestPlan was declared"));
@@ -1264,6 +1372,54 @@ mod tests {
             "cargo test --test integration misc::glob_always_case_insensitive -- --exact"
         ));
         assert!(worker_system_instructions(&request).contains("isolated checkout"));
+    }
+
+    #[test]
+    fn preferred_artifacts_are_allowed_but_not_required() {
+        let mut request = request(None);
+        request.requested_artifact_kinds = vec![ArtifactKind::behavior_trace()];
+        request.preferred_artifact_kinds = vec![ArtifactKind::test_plan()];
+
+        assert_eq!(required_model_artifact_kinds(&request), vec![ArtifactKind::behavior_trace()]);
+        assert_eq!(preferred_model_artifact_kinds(&request), vec![ArtifactKind::test_plan()]);
+        assert_eq!(
+            requested_model_artifact_kinds(&request),
+            vec![ArtifactKind::behavior_trace(), ArtifactKind::test_plan()]
+        );
+        let instructions = worker_system_instructions(&request);
+        assert!(instructions.contains("required artifact kinds: behavior-trace"));
+        assert!(instructions.contains("Preferred artifact kinds: test-plan"));
+        assert!(instructions.contains("Preferred kinds are optional"));
+    }
+
+    #[test]
+    fn missing_preferred_artifact_does_not_make_the_protocol_incomplete() {
+        let mut request = request(None);
+        request.requested_artifact_kinds = vec![ArtifactKind::behavior_trace()];
+        request.preferred_artifact_kinds = vec![ArtifactKind::test_plan()];
+        let required = required_model_artifact_kinds(&request);
+        let allowed = requested_model_artifact_kinds(&request);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut normalized = deserialize_and_normalize(
+            serde_json::json!({
+                "schema": needle_core::ARTIFACT_RESULT_SCHEMA_ID,
+                "artifacts": [{
+                    "kind": "behavior-trace",
+                    "path": "crates/needle-platform-codex/src/worker.rs",
+                    "symbol": "execute_inner",
+                    "facts": ["The worker validates required artifact kinds."]
+                }],
+                "test_plan": null
+            }),
+            &repository,
+            &allowed,
+        );
+        normalized.discard_unrequested_kinds(&allowed);
+        normalized.record_missing_requested_kinds(&required);
+
+        assert!(normalized.missing_requested_kinds(&required).is_empty());
+        assert_eq!(normalized.missing_requested_kinds(&allowed), vec!["test-plan".to_owned()]);
+        assert!(normalized.has_facts());
     }
 
     #[test]
