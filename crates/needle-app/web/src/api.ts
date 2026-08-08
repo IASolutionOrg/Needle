@@ -111,6 +111,9 @@ export type ModelPolicyInput =
 export interface ControlPlane {
   schema: string
   activation: ActivationStatus
+  integrations: {
+    desktop_skill: DesktopSkillStatus
+  }
   runtime: {
     status: string
     transport: string
@@ -206,6 +209,13 @@ export interface ActivationStatus {
   role_profile_id: string | null
   global: ActivationRecord | null
   repository: ActivationRecord | null
+}
+
+export interface DesktopSkillStatus {
+  installed: boolean | null
+  managed: boolean | null
+  ready: boolean
+  error: string | null
 }
 
 export type PatchOperation = "create" | "update" | "delete"
@@ -921,8 +931,7 @@ export function useActivationToggle() {
       }
       return response.json() as Promise<ActivationStatus>
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
-    onError: () => queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["control-plane"] }),
   })
 }
 

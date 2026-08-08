@@ -2,6 +2,7 @@
 param(
     [string]$SourceBinary = (Join-Path $PSScriptRoot "needle.exe"),
     [string]$SourceCodexRuntime = (Join-Path $PSScriptRoot "runtime"),
+    [string]$SourceUninstaller = (Join-Path $PSScriptRoot "uninstall.ps1"),
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA "Programs\Needle"),
     [switch]$SkipPathUpdate
 )
@@ -14,6 +15,9 @@ if (-not (Test-Path -LiteralPath $SourceBinary -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $SourceCodexRuntime -PathType Container)) {
     throw "Needle's managed Codex runtime was not found at $SourceCodexRuntime"
+}
+if (-not (Test-Path -LiteralPath $SourceUninstaller -PathType Leaf)) {
+    throw "Needle's managed uninstaller was not found at $SourceUninstaller"
 }
 
 $requiredRuntimeFiles = @(
@@ -33,6 +37,7 @@ foreach ($relativePath in $requiredRuntimeFiles) {
 
 $source = (Resolve-Path -LiteralPath $SourceBinary).Path
 $runtimeSource = (Resolve-Path -LiteralPath $SourceCodexRuntime).Path
+$uninstallerSource = (Resolve-Path -LiteralPath $SourceUninstaller).Path
 [System.IO.Directory]::CreateDirectory($InstallDirectory) | Out-Null
 $destination = Join-Path $InstallDirectory "needle.exe"
 if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($source, $destination)) {
@@ -43,6 +48,14 @@ $runtimeDirectory = Join-Path $InstallDirectory "runtime"
 [System.IO.Directory]::CreateDirectory($runtimeDirectory) | Out-Null
 if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($runtimeSource, $runtimeDirectory)) {
     Get-ChildItem -LiteralPath $runtimeSource | Copy-Item -Destination $runtimeDirectory -Recurse -Force
+}
+
+$uninstallerDestination = Join-Path $InstallDirectory "uninstall.ps1"
+if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+    $uninstallerSource,
+    $uninstallerDestination
+)) {
+    Copy-Item -LiteralPath $uninstallerSource -Destination $uninstallerDestination -Force
 }
 
 if (-not $SkipPathUpdate) {

@@ -78,9 +78,9 @@ residual intent, and obligation coverage.
 - A resident runtime, SQLite persistence, IPC, and an embedded React control
   plane.
 - A Windows-first portable installer, opt-in
-  `enable`/`disable`/`status`/`debug`/`explore`/`ui` workflow, persistent
-  repository/global activation, Codex CLI hooks, and a managed Codex Desktop
-  skill.
+  `enable`/`disable`/`status`/`debug`/`explore`/`ui` workflow, safe managed
+  `uninstall`, persistent repository/global activation, Codex CLI hooks, and a
+  managed Codex Desktop skill.
 - Symmetric Desktop integration lifecycle: enable installs the managed personal
   skill and disable safely removes only that managed skill.
 - On-demand exploration progress, generated-file-aware repository search,

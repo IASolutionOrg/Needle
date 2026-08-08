@@ -69,14 +69,18 @@ pub(crate) fn run_enable(arguments: Vec<String>) -> Result<(), AppError> {
         )));
     }
     let profile_id = ensure_default_profile(&store, &settings, DEFAULT_MAX_COST_MICROUSD)?;
-    let codex_installations = detect_codex_installations();
-    let integrations = configure_integrations(&codex_installations)?;
     let activation = if global {
         store.set_global_activation(true, Some(&profile_id))
     } else {
         store.set_repository_activation(&repository, true, Some(&profile_id))
     }
     .map_err(runtime_error)?;
+    let codex_installations = detect_codex_installations();
+    let integrations = configure_integrations(&codex_installations).map_err(|error| {
+        AppError::Runtime(format!(
+            "activation was committed but Codex integration reconciliation failed: {error}"
+        ))
+    })?;
     let status = store.activation_status(&repository).map_err(runtime_error)?;
     if json_output {
         println!(
@@ -184,9 +188,9 @@ pub(crate) fn run_disable(arguments: Vec<String>) -> Result<(), AppError> {
     let global = has_flag(&arguments, "--global");
     let repository = activation_context(&arguments, global)?;
     let data_directory = product_data_directory(&arguments)?;
-    let desktop_skill = crate::codex_skill::remove_managed().map_err(AppError::Runtime)?;
     let database = data_directory.join("needle.sqlite3");
     if !database.is_file() {
+        let desktop_skill = crate::codex_skill::remove_managed().map_err(AppError::Runtime)?;
         if json_output {
             println!(
                 "{}",
@@ -215,6 +219,11 @@ pub(crate) fn run_disable(arguments: Vec<String>) -> Result<(), AppError> {
         store.set_repository_activation(&repository, false, None)
     }
     .map_err(runtime_error)?;
+    let desktop_skill = crate::codex_skill::remove_managed().map_err(|error| {
+        AppError::Runtime(format!(
+            "deactivation was committed but Codex Desktop skill reconciliation failed: {error}"
+        ))
+    })?;
     let status = store.activation_status(&repository).map_err(runtime_error)?;
     if json_output {
         println!(

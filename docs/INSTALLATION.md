@@ -143,11 +143,17 @@ needle ui
 `needle ui` opens the local control plane in the default browser. Its toggle
 and the CLI update the same audited activation state and Codex Desktop skill
 lifecycle. Opening the UI alone does not install or modify Codex hooks.
+SQLite activation is the desired source of truth. If Desktop skill
+reconciliation fails after an activation change, the UI refreshes the committed
+activation and reports that the Desktop integration is not ready; running
+`needle enable` retries reconciliation.
 Disabling Needle removes only the managed personal Desktop skill, while keeping
 settings, Codex CLI hooks, and cache data. Any unmanaged skill or sibling file
-is preserved. Enabling Needle again reinstalls the managed skill, so no
-onboarding data is lost. Restart Codex Desktop after either transition so new
-tasks use the updated skill inventory.
+is preserved. If removal fails after deactivation is committed, the UI reports
+that Desktop cleanup is pending and `needle disable` retries it. Enabling Needle
+again reinstalls the managed skill, so no onboarding data is lost. Restart
+Codex Desktop after either transition so new tasks use the updated skill
+inventory.
 
 The Desktop skill is personal rather than repository-local. Consequently, a
 repository or global disable removes the managed Desktop skill for the current
@@ -175,3 +181,23 @@ retain only the latest 20 runs, and never trigger an additional provider call.
 
 The MCP server remains available for explicit integrations and experiments,
 but it is not the default Codex onboarding path.
+
+## Uninstall Needle
+
+From a terminal that resolves the managed Windows installation, run:
+
+```text
+needle uninstall
+```
+
+The command removes only Needle-managed Codex CLI hooks and the managed Codex
+Desktop skill, removes the matching installation directory from the user
+`PATH`, and schedules deletion of `needle.exe`, the bundled Codex runtime, and
+the managed uninstaller after the command exits. A modified or incomplete
+installation is rejected before integrations or files are removed. Files in
+the installation directory that are not managed by Needle are preserved.
+
+Product data is intentionally retained in `%LOCALAPPDATA%\Needle`, including
+settings, SQLite state, cached context, and debug logs. This keeps uninstall
+recoverable and allows a later reinstall to reuse the existing configuration.
+Delete that directory separately only when its contents are no longer needed.

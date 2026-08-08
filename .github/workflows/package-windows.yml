@@ -23,7 +23,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/needle-app/web/package-lock.json
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.90.0
           components: clippy, rustfmt
@@ -71,6 +71,7 @@ jobs:
             }
           }
           Copy-Item packaging/windows/install.ps1 dist/needle-windows-x64/install.ps1
+          Copy-Item packaging/windows/uninstall.ps1 dist/needle-windows-x64/uninstall.ps1
           Copy-Item packaging/windows/CODEX_RUNTIME.md dist/needle-windows-x64/CODEX_RUNTIME.md
           Copy-Item LICENSE.md dist/needle-windows-x64/LICENSE.md
           Copy-Item docs/INSTALLATION.md dist/needle-windows-x64/README.md

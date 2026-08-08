@@ -14,9 +14,9 @@ use needle_core::{
 };
 use needle_platform_codex::CodexWorker;
 use needle_runtime::{
-    ActivationScope, ChangeApplyError, PreparedChangeRecord, ProofCandidate, ProofPlanner,
-    RuntimeSettings, RuntimeStore, apply_verified_change, artifact_and_certificate_are_fresh,
-    built_in_routes, recover_pending_change_applies,
+    ActivationRecord, ActivationScope, ChangeApplyError, PreparedChangeRecord, ProofCandidate,
+    ProofPlanner, RuntimeSettings, RuntimeStore, StoreError, apply_verified_change,
+    artifact_and_certificate_are_fresh, built_in_routes, recover_pending_change_applies,
 };
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -473,9 +473,13 @@ async fn control_plane(State(state): State<AppState>) -> Response {
         Ok(activation) => activation,
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
+    let desktop_skill = desktop_skill_status();
     Json(serde_json::json!({
         "schema": "needle.control-plane/1",
         "activation": activation,
+        "integrations": {
+            "desktop_skill": desktop_skill
+        },
         "runtime": {
             "status": "healthy",
             "transport": "codex-app-server",
@@ -594,34 +598,91 @@ async fn set_activation(
         Ok(scope) => scope,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    if !body.enabled
-        && let Err(error) = crate::codex_skill::remove_managed()
-    {
-        return api_error(StatusCode::CONFLICT, &error);
-    }
-    if let Err(error) = state.store.compare_and_set_activation(
+    let result = commit_activation_and_reconcile(
+        &state.store,
         scope,
         body.enabled,
         profile_id.as_ref(),
         body.expected_state_digest,
-    ) {
-        let status = if matches!(error, needle_runtime::StoreError::ActivationConflict(_)) {
-            StatusCode::PRECONDITION_FAILED
-        } else {
-            StatusCode::CONFLICT
-        };
-        return api_error(status, &error.to_string());
-    }
-    if body.enabled
-        && let Err(error) = crate::codex_skill::ensure_installed()
-    {
-        return api_error(StatusCode::CONFLICT, &error);
+        |enabled| {
+            if enabled {
+                crate::codex_skill::ensure_installed().map(|_| ())
+            } else {
+                crate::codex_skill::remove_managed().map(|_| ())
+            }
+        },
+    );
+    match result {
+        Ok(_) => {}
+        Err(ActivationMutationError::Store(error)) => {
+            let status = if matches!(error, StoreError::ActivationConflict(_)) {
+                StatusCode::PRECONDITION_FAILED
+            } else {
+                StatusCode::CONFLICT
+            };
+            return api_error(status, &error.to_string());
+        }
+        Err(ActivationMutationError::Integration(error)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": error,
+                    "activation_committed": true
+                })),
+            )
+                .into_response();
+        }
     }
     match state.store.activation_status(&state.repository_root) {
         Ok(status) => Json(status).into_response(),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
+
+#[derive(Debug)]
+enum ActivationMutationError {
+    Store(StoreError),
+    Integration(String),
+}
+
+fn commit_activation_and_reconcile(
+    store: &RuntimeStore,
+    scope: ActivationScope,
+    enabled: bool,
+    profile_id: Option<&needle_core::RoleProfileId>,
+    expected_state_digest: Option<Digest>,
+    reconcile: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<ActivationRecord, ActivationMutationError> {
+    let activation = store
+        .compare_and_set_activation(scope, enabled, profile_id, expected_state_digest)
+        .map_err(ActivationMutationError::Store)?;
+    reconcile(enabled).map_err(ActivationMutationError::Integration)?;
+    Ok(activation)
+}
+
+fn desktop_skill_status() -> serde_json::Value {
+    match crate::codex_skill::inspect() {
+        Ok(status) => serde_json::json!({
+            "installed": status.installed,
+            "managed": status.managed,
+            "ready": status.current,
+            "error": null
+        }),
+        Err(error) => {
+            eprintln!("needle: cannot inspect managed Codex Desktop skill ({error})");
+            serde_json::json!({
+                "installed": null,
+                "managed": null,
+                "ready": false,
+                "error": "managed Codex Desktop skill status is unavailable"
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "server/activation_tests.rs"]
+mod activation_tests;
 
 async fn list_needs(State(state): State<AppState>) -> Response {
     match state.store.needs(200) {

@@ -62,6 +62,13 @@ export default function OverviewPage() {
   const semantic = control.data?.semantic
   const proofPlans = semantic?.selected_plans ?? []
   const proofMetrics = semantic?.metrics
+  const desktopSkill = control.data?.integrations.desktop_skill
+  const desktopIntegrationNotReady =
+    control.data?.activation.enabled === true && desktopSkill?.ready !== true
+  const desktopCleanupPending =
+    control.data?.activation.enabled === false &&
+    desktopSkill?.installed === true &&
+    desktopSkill.managed === true
 
   return (
     <div className="grid min-h-[calc(100svh-3.75rem)] grid-cols-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
@@ -80,6 +87,12 @@ export default function OverviewPage() {
               <Badge variant={control.data?.activation.enabled ? "default" : "outline"}>
                 {control.data?.activation.enabled ? "Enabled" : "Disabled"}
               </Badge>
+              {desktopIntegrationNotReady ? (
+                <Badge variant="outline">Desktop not ready</Badge>
+              ) : null}
+              {desktopCleanupPending ? (
+                <Badge variant="outline">Desktop cleanup pending</Badge>
+              ) : null}
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
               When enabled, Codex can request repository context from Needle automatically.
@@ -87,6 +100,18 @@ export default function OverviewPage() {
             {activation.error ? (
               <p role="alert" className="mt-2 text-sm text-destructive">
                 {activation.error.message}
+              </p>
+            ) : null}
+            {desktopIntegrationNotReady ? (
+              <p role="status" className="mt-2 text-sm text-muted-foreground">
+                {desktopSkill?.error ??
+                  "The managed Codex Desktop skill is missing or outdated. Run `needle enable` to reconcile it."}
+              </p>
+            ) : null}
+            {desktopCleanupPending ? (
+              <p role="status" className="mt-2 text-sm text-muted-foreground">
+                Activation is disabled, but the managed Desktop skill remains installed. Run
+                `needle disable` to retry cleanup.
               </p>
             ) : null}
           </div>

@@ -14,6 +14,14 @@ const controlPlane = {
     global: null,
     repository: null,
   },
+  integrations: {
+    desktop_skill: {
+      installed: false,
+      managed: false,
+      ready: false,
+      error: null,
+    },
+  },
   runtime: {
     status: "healthy",
     transport: "codex-app-server",
@@ -92,6 +100,85 @@ test("overview distinguishes proof metrics without inventing cost data", async (
   expect(screen.getByText("0 active")).toBeVisible()
   expect(screen.getByText("No cost data yet")).toBeVisible()
   expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument()
+})
+
+test("overview exposes enabled activation when the Desktop projection is not ready", async () => {
+  window.history.pushState({}, "", "/overview")
+  vi.stubGlobal("EventSource", EventSourceStub)
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ...controlPlane,
+          activation: { ...controlPlane.activation, enabled: true },
+          integrations: {
+            desktop_skill: {
+              installed: null,
+              managed: null,
+              ready: false,
+              error: "managed Codex Desktop skill status is unavailable",
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ),
+  )
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <App />
+      </TooltipProvider>
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByText("Desktop not ready")).toBeVisible()
+  expect(screen.getByText("managed Codex Desktop skill status is unavailable")).toBeVisible()
+  expect(screen.getByRole("button", { name: "Disable Needle" })).toBeEnabled()
+})
+
+test("overview exposes pending Desktop cleanup after deactivation", async () => {
+  window.history.pushState({}, "", "/overview")
+  vi.stubGlobal("EventSource", EventSourceStub)
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ...controlPlane,
+          integrations: {
+            desktop_skill: {
+              installed: true,
+              managed: true,
+              ready: true,
+              error: null,
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ),
+  )
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <App />
+      </TooltipProvider>
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByText("Desktop cleanup pending")).toBeVisible()
+  expect(screen.getByText(/managed Desktop skill remains installed/)).toBeVisible()
+  expect(screen.getByRole("button", { name: "Enable Needle" })).toBeEnabled()
 })
 
 test("changes page lists isolated patches without exposing their full diff", async () => {

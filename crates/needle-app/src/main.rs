@@ -46,6 +46,7 @@ mod minimal_live_pilot;
 mod onboarding;
 mod partial_tests_live;
 mod product_resolver;
+mod uninstall;
 mod worker_live_diagnostic;
 
 const VERSION: &str = "0.1.0";
@@ -91,6 +92,7 @@ fn run() -> Result<(), AppError> {
         "debug" => debug::run(arguments.collect()),
         "explore" => explore::run(arguments.collect()),
         "ui" => onboarding::run_ui(arguments.collect()),
+        "uninstall" => uninstall::run(arguments.collect()),
         "init" => run_init(arguments.collect()),
         "config" => run_config(arguments.collect()),
         "route" => run_route(arguments.collect()),
@@ -116,7 +118,7 @@ fn run() -> Result<(), AppError> {
 
 fn print_usage() {
     println!(
-        "Needle {VERSION}\n\nUsage: needle <command> [options]\n\nCompanion commands:\n  enable   Enable Needle for this repository\n  disable  Disable Needle without deleting data\n  status   Show effective activation and compatibility\n  debug    Manage bounded local worker diagnostics\n  explore  Request bounded repository context\n  ui       Open the local control plane\n\nRun `needle <command> --help` for command options."
+        "Needle {VERSION}\n\nUsage: needle <command> [options]\n\nCompanion commands:\n  enable      Enable Needle for this repository\n  disable     Disable Needle without deleting data\n  status      Show effective activation and compatibility\n  debug       Manage bounded local worker diagnostics\n  explore     Request bounded repository context\n  ui          Open the local control plane\n  uninstall   Remove the managed Windows installation\n\nRun `needle <command> --help` for command options."
     );
 }
 
