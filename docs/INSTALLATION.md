@@ -8,7 +8,18 @@ guarantees.
 ## Install on Windows
 
 Download the `needle-windows-x64` artifact produced by the
-`package-windows` GitHub workflow, extract it, and run:
+`package-windows` GitHub workflow. It contains the installer archive and its
+SHA-256 sidecar. Verify the archive before extracting it:
+
+```powershell
+$expected = (Get-Content .\needle-windows-x64.zip.sha256 -Raw).Trim()
+$actual = (Get-FileHash .\needle-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Needle archive checksum mismatch" }
+Expand-Archive .\needle-windows-x64.zip -DestinationPath .\needle-windows-x64
+Set-Location .\needle-windows-x64
+```
+
+Then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1

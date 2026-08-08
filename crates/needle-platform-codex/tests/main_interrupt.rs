@@ -766,6 +766,7 @@ fn supervised_main_resolves_with_worker_then_continues_without_discovery() {
             repository.to_str(),
         )
         .unwrap();
+    assert!(need.semantic_interrupt.typed().is_some());
     let interrupt = need.semantic_interrupt;
     let engine = RuntimeEngine::new(
         RuntimeStore::new(data.join("needle.sqlite3")),
@@ -785,8 +786,10 @@ fn supervised_main_resolves_with_worker_then_continues_without_discovery() {
         .unwrap();
     assert!(outcome.worker_spawned);
     assert!(outcome.rendered.contains("[NEEDLE_CONTEXT]"));
+    assert!(outcome.rendered.len() <= needle_core::HARD_RESULT_BYTES);
     let final_turn = session.run_continuation(&outcome.rendered, Duration::from_secs(5)).unwrap();
     assert!(final_turn.response.contains("src/lib.rs"));
+    assert!(!final_turn.response.contains("@@need"));
     assert_eq!(need.tool_items_started + final_turn.tool_items_started, 0);
     assert_eq!(store.worker_run_count().unwrap(), 1);
     // The semantic need requests only ImplementationLocation. A declared
